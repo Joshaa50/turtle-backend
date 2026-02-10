@@ -8,29 +8,29 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Connect to Supabase Postgres ---
+// Connect to Neon
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  family: 4 // Force IPv4 to avoid ENETUNREACH on Render
+  ssl: { rejectUnauthorized: false }, // Neon requires SSL
+  family: 4 // Force IPv4 for Render
 });
 
-// Test database connection
+// Test DB connection
 (async () => {
   try {
     const res = await db.query("SELECT NOW()");
-    console.log("Connected to Supabase Postgres! Time:", res.rows[0].now);
+    console.log("Connected to Neon Postgres! Time:", res.rows[0].now);
   } catch (err) {
     console.error("Database connection error:", err);
   }
 })();
 
-// --- Test endpoint ---
+// Test endpoint
 app.get("/test", (req, res) => {
   res.json({ message: "Backend is working!" });
 });
 
-// --- Register endpoint ---
+// Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
     const { first_name, last_name, email, password, role } = req.body;
@@ -41,15 +41,12 @@ app.post("/users/register", async (req, res) => {
 
     const userRole = role || "volunteer";
 
-    // Hash the password
     const password_hash = await bcrypt.hash(password, 10);
 
-    // Insert user into Supabase
     const sql = `
       INSERT INTO users
         (first_name, last_name, email, password_hash, role)
-      VALUES
-        ($1, $2, $3, $4, $5)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING id, first_name, last_name, email, role, email_verified, is_active, created_at;
     `;
 
@@ -76,31 +73,22 @@ app.post("/users/register", async (req, res) => {
   }
 });
 
-// --- Login endpoint ---
+// Login endpoint
 app.post("/users/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required." });
-    }
+    if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
 
     const sql = "SELECT * FROM users WHERE email = $1 LIMIT 1";
     const result = await db.query(sql, [email]);
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: "Invalid email or password." });
-    }
+    if (result.rows.length === 0) return res.status(401).json({ error: "Invalid email or password." });
 
     const user = result.rows[0];
-
     const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) {
-      return res.status(401).json({ error: "Invalid email or password." });
-    }
+    if (!match) return res.status(401).json({ error: "Invalid email or password." });
 
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is inactive." });
-    }
+    if (!user.is_active) return res.status(403).json({ error: "Account is inactive." });
 
     res.json({
       message: "Login successful",
@@ -120,7 +108,7 @@ app.post("/users/login", async (req, res) => {
   }
 });
 
-// --- Start server ---
+// Start server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
