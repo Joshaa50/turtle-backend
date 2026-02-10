@@ -108,6 +108,161 @@ app.post("/users/login", async (req, res) => {
   }
 });
 
+// Create Turtle endpoint
+app.post("/turtles/create", async (req, res) => {
+  try {
+    const {
+      name,
+      species,
+      sex,
+
+      front_left_tag,
+      front_left_address,
+
+      front_right_tag,
+      front_right_address,
+
+      rear_left_tag,
+      rear_left_address,
+
+      rear_right_tag,
+      rear_right_address,
+
+      scl_max,
+      scl_min,
+      scw,
+
+      ccl_max,
+      ccl_min,
+      ccw,
+
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length,
+
+      microchip_number,
+      microchip_location
+    } = req.body;
+
+    // Required field validation (everything except flipper tags/addresses)
+    if (
+      !species ||
+      !sex ||
+      scl_max == null ||
+      scl_min == null ||
+      scw == null ||
+      ccl_max == null ||
+      ccl_min == null ||
+      ccw == null ||
+      tail_extension == null ||
+      vent_to_tail_tip == null ||
+      total_tail_length == null ||
+      !microchip_number ||
+      !microchip_location
+    ) {
+      return res.status(400).json({
+        error: "Missing required fields."
+      });
+    }
+
+    const sql = `
+      INSERT INTO turtles (
+        name,
+        species,
+        sex,
+
+        front_left_tag,
+        front_left_address,
+
+        front_right_tag,
+        front_right_address,
+
+        rear_left_tag,
+        rear_left_address,
+
+        rear_right_tag,
+        rear_right_address,
+
+        scl_max,
+        scl_min,
+        scw,
+
+        ccl_max,
+        ccl_min,
+        ccw,
+
+        tail_extension,
+        vent_to_tail_tip,
+        total_tail_length,
+
+        microchip_number,
+        microchip_location
+      )
+      VALUES (
+        $1, $2, $3,
+        $4, $5,
+        $6, $7,
+        $8, $9,
+        $10, $11,
+        $12, $13, $14,
+        $15, $16, $17,
+        $18, $19, $20,
+        $21, $22
+      )
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [
+      name || null,
+      species,
+      sex,
+
+      front_left_tag || null,
+      front_left_address || null,
+
+      front_right_tag || null,
+      front_right_address || null,
+
+      rear_left_tag || null,
+      rear_left_address || null,
+
+      rear_right_tag || null,
+      rear_right_address || null,
+
+      scl_max,
+      scl_min,
+      scw,
+
+      ccl_max,
+      ccl_min,
+      ccw,
+
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length,
+
+      microchip_number,
+      microchip_location
+    ]);
+
+    res.json({
+      message: "Turtle record created successfully",
+      turtle: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Create turtle error:", err);
+
+    // Microchip unique constraint error
+    if (err.code === "23505") {
+      return res.status(400).json({
+        error: "Microchip number already exists."
+      });
+    }
+
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Start server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
