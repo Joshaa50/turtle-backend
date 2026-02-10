@@ -39,7 +39,7 @@ app.post("/users/register", (req, res) => {
   }
 
   const sql = `
-    INSERT INTO Users
+    INSERT INTO User
       (FirstName, LastName, Email, Password, Role, isEmailVerifyed, isActive)
     VALUES (?, ?, ?, ?, ?, 0, 1)
   `;
@@ -65,7 +65,7 @@ app.post("/users/login", (req, res) => {
     return res.status(400).json({ error: "Email and Password are required." });
   }
 
-  const sql = "SELECT * FROM Users WHERE Email = ? LIMIT 1";
+  const sql = "SELECT * FROM User WHERE Email = ? LIMIT 1";
 
   db.query(sql, [Email], (err, results) => {
     if (err) {
