@@ -111,7 +111,7 @@ app.post("/users/login", async (req, res) => {
 // Create Turtle endpoint
 app.post("/turtles/create", async (req, res) => {
   try {
-    const {
+    let {
       name,
       species,
       sex,
@@ -144,10 +144,19 @@ app.post("/turtles/create", async (req, res) => {
       microchip_location
     } = req.body;
 
+    // Normalize sex
+    sex = sex ? sex.toLowerCase() : null;
+
+    // Validate sex values
+    if (!["male", "female", "unknown"].includes(sex)) {
+      return res.status(400).json({
+        error: "sex must be 'male', 'female', or 'unknown'"
+      });
+    }
+
     // Required field validation (everything except flipper tags/addresses)
     if (
       !species ||
-      !sex ||
       scl_max == null ||
       scl_min == null ||
       scw == null ||
@@ -262,6 +271,7 @@ app.post("/turtles/create", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
 
 // Start server
 const PORT = process.env.PORT || 5001;
