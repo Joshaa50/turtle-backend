@@ -4,30 +4,33 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const bcrypt = require("bcrypt");
 
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Connect to Supabase Postgres
+// --- Connect to Supabase Postgres ---
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  family: 4   // <-- Force IPv4
+  family: 4 // Force IPv4 to avoid ENETUNREACH on Render
 });
 
-
 // Test database connection
-db.query("SELECT NOW()")
-  .then(() => console.log("Connected to Supabase Postgres!"))
-  .catch((err) => console.error("Database connection error:", err));
+(async () => {
+  try {
+    const res = await db.query("SELECT NOW()");
+    console.log("Connected to Supabase Postgres! Time:", res.rows[0].now);
+  } catch (err) {
+    console.error("Database connection error:", err);
+  }
+})();
 
-// Test endpoint
+// --- Test endpoint ---
 app.get("/test", (req, res) => {
   res.json({ message: "Backend is working!" });
 });
 
-// Register endpoint (hash password with bcrypt)
+// --- Register endpoint ---
 app.post("/users/register", async (req, res) => {
   try {
     const { first_name, last_name, email, password, role } = req.body;
@@ -38,9 +41,10 @@ app.post("/users/register", async (req, res) => {
 
     const userRole = role || "volunteer";
 
-    // Hash password
+    // Hash the password
     const password_hash = await bcrypt.hash(password, 10);
 
+    // Insert user into Supabase
     const sql = `
       INSERT INTO users
         (first_name, last_name, email, password_hash, role)
@@ -64,7 +68,6 @@ app.post("/users/register", async (req, res) => {
   } catch (err) {
     console.error("Register error:", err);
 
-    // Duplicate email error (unique constraint)
     if (err.code === "23505") {
       return res.status(400).json({ error: "Email already exists." });
     }
@@ -73,8 +76,51 @@ app.post("/users/register", async (req, res) => {
   }
 });
 
+// --- Login endpoint ---
+app.post("/users/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required." });
+    }
 
-// Start server
+    const sql = "SELECT * FROM users WHERE email = $1 LIMIT 1";
+    const result = await db.query(sql, [email]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
+
+    const user = result.rows[0];
+
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is inactive." });
+    }
+
+    res.json({
+      message: "Login successful",
+      user: {
+        id: user.id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        email: user.email,
+        role: user.role,
+        email_verified: user.email_verified,
+        is_active: user.is_active
+      }
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// --- Start server ---
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
