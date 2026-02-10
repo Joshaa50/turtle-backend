@@ -12,8 +12,10 @@ app.use(express.json());
 // Connect to Supabase Postgres
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  family: 4   // <-- Force IPv4
 });
+
 
 // Test database connection
 db.query("SELECT NOW()")
