@@ -291,6 +291,37 @@ app.get("/turtles", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+// Get all survey events for a specific turtle
+app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
+  try {
+    const { turtle_id } = req.params;
+
+    if (!turtle_id) {
+      return res.status(400).json({ error: "turtle_id is required" });
+    }
+
+    const sql = `
+      SELECT tse.*, t.name AS turtle_name, t.species
+      FROM turtle_survey_events tse
+      JOIN turtles t ON tse.turtle_id = t.id
+      WHERE tse.turtle_id = $1
+      ORDER BY tse.event_date DESC;
+    `;
+
+    const result = await db.query(sql, [turtle_id]);
+
+    res.json({
+      message: "Survey events fetched successfully",
+      turtle_id,
+      turtle_name: result.rows[0]?.turtle_name || null,
+      species: result.rows[0]?.species || null,
+      events: result.rows
+    });
+  } catch (err) {
+    console.error("Get turtle survey events error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
 
 // Create Turtle Survey Event endpoint
 app.post("/turtle_survey_events/create", async (req, res) => {
