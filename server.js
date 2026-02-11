@@ -451,6 +451,128 @@ app.post("/turtle_survey_events/create", async (req, res) => {
   }
 });
 
+// Update turtle tags + measurements endpoint
+app.put("/turtles/:id/update", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const {
+      front_left_tag,
+      front_left_address,
+
+      front_right_tag,
+      front_right_address,
+
+      rear_left_tag,
+      rear_left_address,
+
+      rear_right_tag,
+      rear_right_address,
+
+      scl_max,
+      scl_min,
+      scw,
+
+      ccl_max,
+      ccl_min,
+      ccw,
+
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length
+    } = req.body;
+
+    // Validation (all measurement fields required)
+    if (
+      scl_max == null ||
+      scl_min == null ||
+      scw == null ||
+      ccl_max == null ||
+      ccl_min == null ||
+      ccw == null ||
+      tail_extension == null ||
+      vent_to_tail_tip == null ||
+      total_tail_length == null
+    ) {
+      return res.status(400).json({
+        error: "All measurement fields are required."
+      });
+    }
+
+    const sql = `
+      UPDATE turtles
+      SET
+        front_left_tag = $1,
+        front_left_address = $2,
+
+        front_right_tag = $3,
+        front_right_address = $4,
+
+        rear_left_tag = $5,
+        rear_left_address = $6,
+
+        rear_right_tag = $7,
+        rear_right_address = $8,
+
+        scl_max = $9,
+        scl_min = $10,
+        scw = $11,
+
+        ccl_max = $12,
+        ccl_min = $13,
+        ccw = $14,
+
+        tail_extension = $15,
+        vent_to_tail_tip = $16,
+        total_tail_length = $17,
+
+        updated_at = NOW()
+      WHERE id = $18
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [
+      front_left_tag || null,
+      front_left_address || null,
+
+      front_right_tag || null,
+      front_right_address || null,
+
+      rear_left_tag || null,
+      rear_left_address || null,
+
+      rear_right_tag || null,
+      rear_right_address || null,
+
+      scl_max,
+      scl_min,
+      scw,
+
+      ccl_max,
+      ccl_min,
+      ccw,
+
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length,
+
+      id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Turtle not found." });
+    }
+
+    res.json({
+      message: "Turtle updated successfully",
+      turtle: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Update turtle error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 // Start server
