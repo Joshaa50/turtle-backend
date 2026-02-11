@@ -115,6 +115,7 @@ app.post("/turtles/create", async (req, res) => {
       name,
       species,
       sex,
+      health_condition,
 
       front_left_tag,
       front_left_address,
@@ -144,19 +145,20 @@ app.post("/turtles/create", async (req, res) => {
       microchip_location
     } = req.body;
 
-    // Normalize sex
-    sex = sex ? sex.toLowerCase() : null;
+    // Normalize sex to satisfy CHECK constraint
+    sex = sex ? sex.toLowerCase() : "unknown";
 
-    // Validate sex values
+    // Validate sex
     if (!["male", "female", "unknown"].includes(sex)) {
       return res.status(400).json({
         error: "sex must be 'male', 'female', or 'unknown'"
       });
     }
 
-    // Required field validation (everything except flipper tags/addresses)
+    // Validate required fields
     if (
       !species ||
+      !health_condition ||
       scl_max == null ||
       scl_min == null ||
       scw == null ||
@@ -179,6 +181,7 @@ app.post("/turtles/create", async (req, res) => {
         name,
         species,
         sex,
+        health_condition,
 
         front_left_tag,
         front_left_address,
@@ -208,15 +211,15 @@ app.post("/turtles/create", async (req, res) => {
         microchip_location
       )
       VALUES (
-        $1, $2, $3,
-        $4, $5,
-        $6, $7,
-        $8, $9,
-        $10, $11,
-        $12, $13, $14,
-        $15, $16, $17,
-        $18, $19, $20,
-        $21, $22
+        $1, $2, $3, $4,
+        $5, $6,
+        $7, $8,
+        $9, $10,
+        $11, $12,
+        $13, $14, $15,
+        $16, $17, $18,
+        $19, $20, $21,
+        $22, $23
       )
       RETURNING *;
     `;
@@ -225,6 +228,7 @@ app.post("/turtles/create", async (req, res) => {
       name || null,
       species,
       sex,
+      health_condition,
 
       front_left_tag || null,
       front_left_address || null,
@@ -261,7 +265,7 @@ app.post("/turtles/create", async (req, res) => {
   } catch (err) {
     console.error("Create turtle error:", err);
 
-    // Microchip unique constraint error
+    // Handle unique microchip constraint
     if (err.code === "23505") {
       return res.status(400).json({
         error: "Microchip number already exists."
@@ -271,6 +275,8 @@ app.post("/turtles/create", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
+
 // Get all turtles endpoint
 app.get("/turtles", async (req, res) => {
   try {
