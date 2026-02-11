@@ -271,6 +271,20 @@ app.post("/turtles/create", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+// Get all turtles endpoint
+app.get("/turtles", async (req, res) => {
+  try {
+    const result = await db.query("SELECT * FROM turtles ORDER BY created_at DESC;");
+
+    res.json({
+      message: "Turtles fetched successfully",
+      turtles: result.rows
+    });
+  } catch (err) {
+    console.error("Get turtles error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
 
 
 // Start server
