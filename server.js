@@ -139,10 +139,7 @@ app.post("/turtles/create", async (req, res) => {
 
       tail_extension,
       vent_to_tail_tip,
-      total_tail_length,
-
-      microchip_number,
-      microchip_location
+      total_tail_length
     } = req.body;
 
     // Normalize sex to satisfy CHECK constraint
@@ -167,9 +164,7 @@ app.post("/turtles/create", async (req, res) => {
       ccw == null ||
       tail_extension == null ||
       vent_to_tail_tip == null ||
-      total_tail_length == null ||
-      !microchip_number ||
-      !microchip_location
+      total_tail_length == null
     ) {
       return res.status(400).json({
         error: "Missing required fields."
@@ -205,10 +200,7 @@ app.post("/turtles/create", async (req, res) => {
 
         tail_extension,
         vent_to_tail_tip,
-        total_tail_length,
-
-        microchip_number,
-        microchip_location
+        total_tail_length
       )
       VALUES (
         $1, $2, $3, $4,
@@ -218,8 +210,7 @@ app.post("/turtles/create", async (req, res) => {
         $11, $12,
         $13, $14, $15,
         $16, $17, $18,
-        $19, $20, $21,
-        $22, $23
+        $19, $20, $21
       )
       RETURNING *;
     `;
@@ -252,10 +243,7 @@ app.post("/turtles/create", async (req, res) => {
 
       tail_extension,
       vent_to_tail_tip,
-      total_tail_length,
-
-      microchip_number,
-      microchip_location
+      total_tail_length
     ]);
 
     res.json({
@@ -264,13 +252,6 @@ app.post("/turtles/create", async (req, res) => {
     });
   } catch (err) {
     console.error("Create turtle error:", err);
-
-    // Handle unique microchip constraint
-    if (err.code === "23505") {
-      return res.status(400).json({
-        error: "Microchip number already exists."
-      });
-    }
 
     res.status(500).json({ error: "Server error." });
   }
