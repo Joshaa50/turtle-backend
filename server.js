@@ -47,7 +47,7 @@ app.post("/users/register", async (req, res) => {
       INSERT INTO users
         (first_name, last_name, email, password_hash, role)
       VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, first_name, last_name, email, role, email_verified, is_active, created_at;
+      RETURNING id, first_name, last_name, email, role, is_email_verified, is_active, created_at;
     `;
 
     const result = await db.query(sql, [
@@ -98,7 +98,7 @@ app.post("/users/login", async (req, res) => {
         last_name: user.last_name,
         email: user.email,
         role: user.role,
-        email_verified: user.email_verified,
+        is_email_verified: user.is_email_verified,
         is_active: user.is_active
       }
     });
