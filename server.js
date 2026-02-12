@@ -580,6 +580,28 @@ app.put("/turtles/:id/update", async (req, res) => {
   }
 });
 
+// Get turtle by ID
+app.get("/turtles/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const sql = `SELECT * FROM turtles WHERE id = $1;`;
+    const result = await db.query(sql, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Turtle not found." });
+    }
+
+    res.json({
+      message: "Turtle fetched successfully",
+      turtle: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Get turtle by ID error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 // Start server
