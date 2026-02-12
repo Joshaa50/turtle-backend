@@ -451,12 +451,14 @@ app.post("/turtle_survey_events/create", async (req, res) => {
   }
 });
 
-// Update turtle tags + measurements endpoint
+// Update turtle tags + measurements + health condition endpoint
 app.put("/turtles/:id/update", async (req, res) => {
   try {
     const { id } = req.params;
 
     const {
+      health_condition,
+
       front_left_tag,
       front_left_address,
 
@@ -482,8 +484,9 @@ app.put("/turtles/:id/update", async (req, res) => {
       total_tail_length
     } = req.body;
 
-    // Validation (all measurement fields required)
+    // Validation (health + all measurement fields required)
     if (
+      !health_condition ||
       scl_max == null ||
       scl_min == null ||
       scw == null ||
@@ -495,43 +498,47 @@ app.put("/turtles/:id/update", async (req, res) => {
       total_tail_length == null
     ) {
       return res.status(400).json({
-        error: "All measurement fields are required."
+        error: "health_condition and all measurement fields are required."
       });
     }
 
     const sql = `
       UPDATE turtles
       SET
-        front_left_tag = $1,
-        front_left_address = $2,
+        health_condition = $1,
 
-        front_right_tag = $3,
-        front_right_address = $4,
+        front_left_tag = $2,
+        front_left_address = $3,
 
-        rear_left_tag = $5,
-        rear_left_address = $6,
+        front_right_tag = $4,
+        front_right_address = $5,
 
-        rear_right_tag = $7,
-        rear_right_address = $8,
+        rear_left_tag = $6,
+        rear_left_address = $7,
 
-        scl_max = $9,
-        scl_min = $10,
-        scw = $11,
+        rear_right_tag = $8,
+        rear_right_address = $9,
 
-        ccl_max = $12,
-        ccl_min = $13,
-        ccw = $14,
+        scl_max = $10,
+        scl_min = $11,
+        scw = $12,
 
-        tail_extension = $15,
-        vent_to_tail_tip = $16,
-        total_tail_length = $17,
+        ccl_max = $13,
+        ccl_min = $14,
+        ccw = $15,
+
+        tail_extension = $16,
+        vent_to_tail_tip = $17,
+        total_tail_length = $18,
 
         updated_at = NOW()
-      WHERE id = $18
+      WHERE id = $19
       RETURNING *;
     `;
 
     const result = await db.query(sql, [
+      health_condition,
+
       front_left_tag || null,
       front_left_address || null,
 
@@ -569,27 +576,6 @@ app.put("/turtles/:id/update", async (req, res) => {
     });
   } catch (err) {
     console.error("Update turtle error:", err);
-    res.status(500).json({ error: "Server error." });
-  }
-});
-// Get turtle by ID
-app.get("/turtles/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const sql = `SELECT * FROM turtles WHERE id = $1;`;
-    const result = await db.query(sql, [id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Turtle not found." });
-    }
-
-    res.json({
-      message: "Turtle fetched successfully",
-      turtle: result.rows[0]
-    });
-  } catch (err) {
-    console.error("Get turtle by ID error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
