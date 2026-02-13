@@ -626,6 +626,7 @@ app.post("/nests/create", async (req, res) => {
       tri_tr_distance,
 
       status,
+      relocated,
       date_found,
       beach,
       notes
@@ -678,6 +679,7 @@ app.post("/nests/create", async (req, res) => {
         tri_tr_distance,
 
         status,
+        relocated,
         date_found,
         beach,
         notes
@@ -686,7 +688,7 @@ app.post("/nests/create", async (req, res) => {
         $1,$2,$3,$4,$5,$6,$7,$8,
         $9,$10,$11,$12,
         $13,$14,$15,$16,
-        $17,$18,$19,$20
+        $17,$18,$19,$20,$21
       )
       RETURNING *;
     `;
@@ -712,6 +714,7 @@ app.post("/nests/create", async (req, res) => {
       tri_tr_distance || null,
 
       nestStatus,
+      relocated ?? false,
       date_found,
       beach,
       notes || null
@@ -724,7 +727,6 @@ app.post("/nests/create", async (req, res) => {
   } catch (err) {
     console.error("Create nest error:", err);
 
-    // Duplicate nest_code
     if (err.code === "23505") {
       return res.status(400).json({
         error: "Nest code already exists."
