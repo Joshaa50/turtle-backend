@@ -602,6 +602,140 @@ app.get("/turtles/:id", async (req, res) => {
   }
 });
 
+// Create Nest endpoint
+app.post("/nests/create", async (req, res) => {
+  try {
+    const {
+      nest_code,
+      num_eggs,
+      depth_top_egg_h,
+      depth_bottom_chamber_h,
+      distance_to_sea_s,
+      width_w,
+      gps_long,
+      gps_lat,
+
+      tri_tl_desc,
+      tri_tl_lat,
+      tri_tl_long,
+      tri_tl_distance,
+
+      tri_tr_desc,
+      tri_tr_lat,
+      tri_tr_long,
+      tri_tr_distance,
+
+      status,
+      date_found,
+      beach,
+      notes
+    } = req.body;
+
+    // Required fields validation
+    if (
+      !nest_code ||
+      depth_top_egg_h == null ||
+      distance_to_sea_s == null ||
+      gps_long == null ||
+      gps_lat == null ||
+      !date_found ||
+      !beach
+    ) {
+      return res.status(400).json({
+        error: "Missing required fields."
+      });
+    }
+
+    // Validate status if provided
+    const validStatuses = ["incubating", "hatching", "hatched"];
+    const nestStatus = status ? status.toLowerCase() : "incubating";
+
+    if (!validStatuses.includes(nestStatus)) {
+      return res.status(400).json({
+        error: "status must be 'incubating', 'hatching', or 'hatched'"
+      });
+    }
+
+    const sql = `
+      INSERT INTO turtle_nests (
+        nest_code,
+        num_eggs,
+        depth_top_egg_h,
+        depth_bottom_chamber_h,
+        distance_to_sea_s,
+        width_w,
+        gps_long,
+        gps_lat,
+
+        tri_tl_desc,
+        tri_tl_lat,
+        tri_tl_long,
+        tri_tl_distance,
+
+        tri_tr_desc,
+        tri_tr_lat,
+        tri_tr_long,
+        tri_tr_distance,
+
+        status,
+        date_found,
+        beach,
+        notes
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,
+        $9,$10,$11,$12,
+        $13,$14,$15,$16,
+        $17,$18,$19,$20
+      )
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [
+      nest_code,
+      num_eggs || null,
+      depth_top_egg_h,
+      depth_bottom_chamber_h || null,
+      distance_to_sea_s,
+      width_w || null,
+      gps_long,
+      gps_lat,
+
+      tri_tl_desc || null,
+      tri_tl_lat || null,
+      tri_tl_long || null,
+      tri_tl_distance || null,
+
+      tri_tr_desc || null,
+      tri_tr_lat || null,
+      tri_tr_long || null,
+      tri_tr_distance || null,
+
+      nestStatus,
+      date_found,
+      beach,
+      notes || null
+    ]);
+
+    res.json({
+      message: "Nest created successfully",
+      nest: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Create nest error:", err);
+
+    // Duplicate nest_code
+    if (err.code === "23505") {
+      return res.status(400).json({
+        error: "Nest code already exists."
+      });
+    }
+
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+
 
 
 // Start server
