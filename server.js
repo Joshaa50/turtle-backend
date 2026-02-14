@@ -627,6 +627,7 @@ app.post("/nests/create", async (req, res) => {
 
       status,
       relocated,
+      is_archived,
       date_found,
       beach,
       notes
@@ -680,6 +681,7 @@ app.post("/nests/create", async (req, res) => {
 
         status,
         relocated,
+        is_archived,
         date_found,
         beach,
         notes
@@ -688,7 +690,7 @@ app.post("/nests/create", async (req, res) => {
         $1,$2,$3,$4,$5,$6,$7,$8,
         $9,$10,$11,$12,
         $13,$14,$15,$16,
-        $17,$18,$19,$20,$21
+        $17,$18,$19,$20,$21,$22
       )
       RETURNING *;
     `;
@@ -715,6 +717,7 @@ app.post("/nests/create", async (req, res) => {
 
       nestStatus,
       relocated ?? false,
+      is_archived ?? false,
       date_found,
       beach,
       notes || null
@@ -736,6 +739,172 @@ app.post("/nests/create", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
+// Update Nest endpoint
+app.put("/nests/:id/update", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const {
+      nest_code,
+      num_eggs,
+      depth_top_egg_h,
+      depth_bottom_chamber_h,
+      distance_to_sea_s,
+      width_w,
+      gps_long,
+      gps_lat,
+
+      tri_tl_desc,
+      tri_tl_lat,
+      tri_tl_long,
+      tri_tl_distance,
+
+      tri_tr_desc,
+      tri_tr_lat,
+      tri_tr_long,
+      tri_tr_distance,
+
+      status,
+      relocated,
+      is_archived,
+      date_found,
+      beach,
+      notes
+    } = req.body;
+
+    // Required fields validation
+    if (
+      !nest_code ||
+      depth_top_egg_h == null ||
+      distance_to_sea_s == null ||
+      gps_long == null ||
+      gps_lat == null ||
+      !date_found ||
+      !beach
+    ) {
+      return res.status(400).json({
+        error: "Missing required fields."
+      });
+    }
+
+    // Validate status
+    const validStatuses = ["incubating", "hatching", "hatched"];
+    const nestStatus = status ? status.toLowerCase() : "incubating";
+
+    if (!validStatuses.includes(nestStatus)) {
+      return res.status(400).json({
+        error: "status must be 'incubating', 'hatching', or 'hatched'"
+      });
+    }
+
+    const sql = `
+      UPDATE turtle_nests
+      SET
+        nest_code = $1,
+        num_eggs = $2,
+        depth_top_egg_h = $3,
+        depth_bottom_chamber_h = $4,
+        distance_to_sea_s = $5,
+        width_w = $6,
+        gps_long = $7,
+        gps_lat = $8,
+
+        tri_tl_desc = $9,
+        tri_tl_lat = $10,
+        tri_tl_long = $11,
+        tri_tl_distance = $12,
+
+        tri_tr_desc = $13,
+        tri_tr_lat = $14,
+        tri_tr_long = $15,
+        tri_tr_distance = $16,
+
+        status = $17,
+        relocated = $18,
+        is_archived = $19,
+        date_found = $20,
+        beach = $21,
+        notes = $22,
+
+        updated_at = NOW()
+      WHERE id = $23
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [
+      nest_code,
+      num_eggs || null,
+      depth_top_egg_h,
+      depth_bottom_chamber_h || null,
+      distance_to_sea_s,
+      width_w || null,
+      gps_long,
+      gps_lat,
+
+      tri_tl_desc || null,
+      tri_tl_lat || null,
+      tri_tl_long || null,
+      tri_tl_distance || null,
+
+      tri_tr_desc || null,
+      tri_tr_lat || null,
+      tri_tr_long || null,
+      tri_tr_distance || null,
+
+      nestStatus,
+      relocated ?? false,
+      is_archived ?? false,
+      date_found,
+      beach,
+      notes || null,
+
+      id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found." });
+    }
+
+    res.json({
+      message: "Nest updated successfully",
+      nest: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Update nest error:", err);
+
+    // Duplicate nest_code error
+    if (err.code === "23505") {
+      return res.status(400).json({
+        error: "Nest code already exists."
+      });
+    }
+
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Get all nests endpoint
+app.get("/nests", async (req, res) => {
+  try {
+    const sql = `
+      SELECT *
+      FROM turtle_nests
+      ORDER BY date_found DESC, id DESC;
+    `;
+
+    const result = await db.query(sql);
+
+    res.json({
+      message: "Nests fetched successfully",
+      nests: result.rows
+    });
+  } catch (err) {
+    console.error("Get all nests error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
