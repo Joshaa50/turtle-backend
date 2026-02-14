@@ -905,6 +905,35 @@ app.get("/nests", async (req, res) => {
   }
 });
 
+// Get nest by nest_code
+app.get("/nests/:nest_code", async (req, res) => {
+  try {
+    const { nest_code } = req.params;
+
+    const sql = `
+      SELECT *
+      FROM turtle_nests
+      WHERE nest_code = $1
+      LIMIT 1;
+    `;
+
+    const result = await db.query(sql, [nest_code]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found" });
+    }
+
+    res.json({
+      message: "Nest found",
+      nest: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Get nest error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+
 
 
 
