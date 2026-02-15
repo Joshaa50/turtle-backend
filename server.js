@@ -629,7 +629,9 @@ app.post("/nests/create", async (req, res) => {
   try {
     const {
       nest_code,
-      num_eggs,
+      total_num_eggs,
+      current_num_eggs,
+
       depth_top_egg_h,
       depth_bottom_chamber_h,
       distance_to_sea_s,
@@ -680,10 +682,15 @@ app.post("/nests/create", async (req, res) => {
       });
     }
 
+    // Default current_num_eggs to total_num_eggs if not provided
+    const currentEggs =
+      current_num_eggs != null ? current_num_eggs : total_num_eggs;
+
     const sql = `
       INSERT INTO turtle_nests (
         nest_code,
-        num_eggs,
+        total_num_eggs,
+        current_num_eggs,
         depth_top_egg_h,
         depth_bottom_chamber_h,
         distance_to_sea_s,
@@ -709,17 +716,18 @@ app.post("/nests/create", async (req, res) => {
         notes
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,
-        $9,$10,$11,$12,
-        $13,$14,$15,$16,
-        $17,$18,$19,$20,$21,$22
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,
+        $10,$11,$12,$13,
+        $14,$15,$16,$17,
+        $18,$19,$20,$21,$22,$23
       )
       RETURNING *;
     `;
 
     const result = await db.query(sql, [
       nest_code,
-      num_eggs || null,
+      total_num_eggs || null,
+      currentEggs || null,
       depth_top_egg_h,
       depth_bottom_chamber_h || null,
       distance_to_sea_s,
@@ -769,7 +777,9 @@ app.put("/nests/:id/update", async (req, res) => {
 
     const {
       nest_code,
-      num_eggs,
+      total_num_eggs,
+      current_num_eggs,
+
       depth_top_egg_h,
       depth_bottom_chamber_h,
       distance_to_sea_s,
@@ -824,39 +834,43 @@ app.put("/nests/:id/update", async (req, res) => {
       UPDATE turtle_nests
       SET
         nest_code = $1,
-        num_eggs = $2,
-        depth_top_egg_h = $3,
-        depth_bottom_chamber_h = $4,
-        distance_to_sea_s = $5,
-        width_w = $6,
-        gps_long = $7,
-        gps_lat = $8,
+        total_num_eggs = $2,
+        current_num_eggs = $3,
 
-        tri_tl_desc = $9,
-        tri_tl_lat = $10,
-        tri_tl_long = $11,
-        tri_tl_distance = $12,
+        depth_top_egg_h = $4,
+        depth_bottom_chamber_h = $5,
+        distance_to_sea_s = $6,
+        width_w = $7,
+        gps_long = $8,
+        gps_lat = $9,
 
-        tri_tr_desc = $13,
-        tri_tr_lat = $14,
-        tri_tr_long = $15,
-        tri_tr_distance = $16,
+        tri_tl_desc = $10,
+        tri_tl_lat = $11,
+        tri_tl_long = $12,
+        tri_tl_distance = $13,
 
-        status = $17,
-        relocated = $18,
-        is_archived = $19,
-        date_found = $20,
-        beach = $21,
-        notes = $22,
+        tri_tr_desc = $14,
+        tri_tr_lat = $15,
+        tri_tr_long = $16,
+        tri_tr_distance = $17,
+
+        status = $18,
+        relocated = $19,
+        is_archived = $20,
+        date_found = $21,
+        beach = $22,
+        notes = $23,
 
         updated_at = NOW()
-      WHERE id = $23
+      WHERE id = $24
       RETURNING *;
     `;
 
     const result = await db.query(sql, [
       nest_code,
-      num_eggs || null,
+      total_num_eggs || null,
+      current_num_eggs || null,
+
       depth_top_egg_h,
       depth_bottom_chamber_h || null,
       distance_to_sea_s,
@@ -895,7 +909,6 @@ app.put("/nests/:id/update", async (req, res) => {
   } catch (err) {
     console.error("Update nest error:", err);
 
-    // Duplicate nest_code error
     if (err.code === "23505") {
       return res.status(400).json({
         error: "Nest code already exists."
@@ -905,6 +918,7 @@ app.put("/nests/:id/update", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
 
 // Get all nests endpoint
 app.get("/nests", async (req, res) => {
