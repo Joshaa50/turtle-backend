@@ -1024,6 +1024,12 @@ app.post("/nest-events/create", async (req, res) => {
 
       piped_alive_count,
 
+      // NEW FIELDS
+      alive_within,
+      dead_within,
+      alive_above,
+      dead_above,
+
       reburied_depth_top_egg_h,
       reburied_depth_bottom_chamber_h,
       reburied_width_w,
@@ -1110,6 +1116,11 @@ app.post("/nest-events/create", async (req, res) => {
 
         piped_alive_count,
 
+        alive_within,
+        dead_within,
+        alive_above,
+        dead_above,
+
         reburied_depth_top_egg_h,
         reburied_depth_bottom_chamber_h,
         reburied_width_w,
@@ -1134,8 +1145,9 @@ app.post("/nest-events/create", async (req, res) => {
         $33,$34,$35,$36,
         $37,$38,$39,$40,
         $41,
-        $42,$43,$44,$45,$46,$47,
-        $48,$49,$50,$51
+        $42,$43,$44,$45,
+        $46,$47,$48,$49,$50,$51,
+        $52,$53,$54,$55
       )
       RETURNING *;
     `;
@@ -1193,6 +1205,11 @@ app.post("/nest-events/create", async (req, res) => {
 
       piped_alive_count || null,
 
+      alive_within || null,
+      dead_within || null,
+      alive_above || null,
+      dead_above || null,
+
       reburied_depth_top_egg_h || null,
       reburied_depth_bottom_chamber_h || null,
       reburied_width_w || null,
@@ -1215,6 +1232,7 @@ app.post("/nest-events/create", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
 
 
 
