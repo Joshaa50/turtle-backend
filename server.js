@@ -30,6 +30,8 @@ app.get("/test", (req, res) => {
   res.json({ message: "Backend is working!" });
 });
 
+// Users table 
+//--------------------------------------------------------------
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
@@ -94,7 +96,6 @@ app.get("/users", async (req, res) => {
   }
 });
 
-
 // Login endpoint
 app.post("/users/login", async (req, res) => {
   try {
@@ -130,6 +131,8 @@ app.post("/users/login", async (req, res) => {
   }
 });
 
+// Turtles table
+//--------------------------------------------------------------
 // Create Turtle endpoint
 app.post("/turtles/create", async (req, res) => {
   try {
@@ -279,7 +282,6 @@ app.post("/turtles/create", async (req, res) => {
   }
 });
 
-
 // Get all turtles endpoint
 app.get("/turtles", async (req, res) => {
   try {
@@ -322,153 +324,6 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
     });
   } catch (err) {
     console.error("Get turtle survey events error:", err);
-    res.status(500).json({ error: "Server error." });
-  }
-});
-
-// Create Turtle Survey Event endpoint
-app.post("/turtle_survey_events/create", async (req, res) => {
-  try {
-    const {
-      event_date,
-      event_type,
-      location,
-      turtle_id,
-
-      front_left_tag,
-      front_left_address,
-      front_right_tag,
-      front_right_address,
-      rear_left_tag,
-      rear_left_address,
-      rear_right_tag,
-      rear_right_address,
-
-      scl_max,
-      scl_min,
-      scw,
-      ccl_max,
-      ccl_min,
-      ccw,
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length,
-
-      health_condition,
-      observer,
-      notes,
-
-      time_first_seen,
-      time_start_egg_laying,
-      time_covering,
-      time_end_camouflage,
-      time_reach_sea
-    } = req.body;
-
-    // Required field validation
-    const requiredFields = [
-      "event_type", "location", "turtle_id",
-      "scl_max", "scl_min", "scw",
-      "ccl_max", "ccl_min", "ccw",
-      "tail_extension", "vent_to_tail_tip", "total_tail_length",
-      "health_condition", "observer"
-    ];
-
-    for (const field of requiredFields) {
-      if (req.body[field] === undefined || req.body[field] === null) {
-        return res.status(400).json({ error: `${field} is required` });
-      }
-    }
-
-    const sql = `
-      INSERT INTO turtle_survey_events (
-        event_date,
-        event_type,
-        location,
-        turtle_id,
-
-        front_left_tag,
-        front_left_address,
-        front_right_tag,
-        front_right_address,
-        rear_left_tag,
-        rear_left_address,
-        rear_right_tag,
-        rear_right_address,
-
-        scl_max,
-        scl_min,
-        scw,
-        ccl_max,
-        ccl_min,
-        ccw,
-        tail_extension,
-        vent_to_tail_tip,
-        total_tail_length,
-
-        health_condition,
-        observer,
-        notes,
-
-        time_first_seen,
-        time_start_egg_laying,
-        time_covering,
-        time_end_camouflage,
-        time_reach_sea
-      )
-      VALUES (
-        $1,$2,$3,$4,
-        $5,$6,$7,$8,$9,$10,$11,$12,
-        $13,$14,$15,$16,$17,$18,$19,$20,$21,
-        $22,$23,$24,$25,$26,$27,$28,$29
-      )
-      RETURNING *;
-    `;
-
-    const values = [
-      event_date || new Date(),
-      event_type,
-      location,
-      turtle_id,
-
-      front_left_tag || null,
-      front_left_address || null,
-      front_right_tag || null,
-      front_right_address || null,
-      rear_left_tag || null,
-      rear_left_address || null,
-      rear_right_tag || null,
-      rear_right_address || null,
-
-      scl_max,
-      scl_min,
-      scw,
-      ccl_max,
-      ccl_min,
-      ccw,
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length,
-
-      health_condition,
-      observer,
-      notes || null,
-
-      time_first_seen || null,
-      time_start_egg_laying || null,
-      time_covering || null,
-      time_end_camouflage || null,
-      time_reach_sea || null
-    ];
-
-    const result = await db.query(sql, values);
-
-    res.json({
-      message: "Turtle survey event created successfully",
-      event: result.rows[0]
-    });
-  } catch (err) {
-    console.error("Create turtle survey event error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -624,6 +479,158 @@ app.get("/turtles/:id", async (req, res) => {
   }
 });
 
+// Turtle Survey events table
+//--------------------------------------------------------------
+// Create Turtle Survey Event endpoint
+app.post("/turtle_survey_events/create", async (req, res) => {
+  try {
+    const {
+      event_date,
+      event_type,
+      location,
+      turtle_id,
+
+      front_left_tag,
+      front_left_address,
+      front_right_tag,
+      front_right_address,
+      rear_left_tag,
+      rear_left_address,
+      rear_right_tag,
+      rear_right_address,
+
+      scl_max,
+      scl_min,
+      scw,
+      ccl_max,
+      ccl_min,
+      ccw,
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length,
+
+      health_condition,
+      observer,
+      notes,
+
+      time_first_seen,
+      time_start_egg_laying,
+      time_covering,
+      time_end_camouflage,
+      time_reach_sea
+    } = req.body;
+
+    // Required field validation
+    const requiredFields = [
+      "event_type", "location", "turtle_id",
+      "scl_max", "scl_min", "scw",
+      "ccl_max", "ccl_min", "ccw",
+      "tail_extension", "vent_to_tail_tip", "total_tail_length",
+      "health_condition", "observer"
+    ];
+
+    for (const field of requiredFields) {
+      if (req.body[field] === undefined || req.body[field] === null) {
+        return res.status(400).json({ error: `${field} is required` });
+      }
+    }
+
+    const sql = `
+      INSERT INTO turtle_survey_events (
+        event_date,
+        event_type,
+        location,
+        turtle_id,
+
+        front_left_tag,
+        front_left_address,
+        front_right_tag,
+        front_right_address,
+        rear_left_tag,
+        rear_left_address,
+        rear_right_tag,
+        rear_right_address,
+
+        scl_max,
+        scl_min,
+        scw,
+        ccl_max,
+        ccl_min,
+        ccw,
+        tail_extension,
+        vent_to_tail_tip,
+        total_tail_length,
+
+        health_condition,
+        observer,
+        notes,
+
+        time_first_seen,
+        time_start_egg_laying,
+        time_covering,
+        time_end_camouflage,
+        time_reach_sea
+      )
+      VALUES (
+        $1,$2,$3,$4,
+        $5,$6,$7,$8,$9,$10,$11,$12,
+        $13,$14,$15,$16,$17,$18,$19,$20,$21,
+        $22,$23,$24,$25,$26,$27,$28,$29
+      )
+      RETURNING *;
+    `;
+
+    const values = [
+      event_date || new Date(),
+      event_type,
+      location,
+      turtle_id,
+
+      front_left_tag || null,
+      front_left_address || null,
+      front_right_tag || null,
+      front_right_address || null,
+      rear_left_tag || null,
+      rear_left_address || null,
+      rear_right_tag || null,
+      rear_right_address || null,
+
+      scl_max,
+      scl_min,
+      scw,
+      ccl_max,
+      ccl_min,
+      ccw,
+      tail_extension,
+      vent_to_tail_tip,
+      total_tail_length,
+
+      health_condition,
+      observer,
+      notes || null,
+
+      time_first_seen || null,
+      time_start_egg_laying || null,
+      time_covering || null,
+      time_end_camouflage || null,
+      time_reach_sea || null
+    ];
+
+    const result = await db.query(sql, values);
+
+    res.json({
+      message: "Turtle survey event created successfully",
+      event: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Create turtle survey event error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+
+// Turtle nests 
+//--------------------------------------------------------------
 // Create Nest endpoint
 app.post("/nests/create", async (req, res) => {
   try {
@@ -941,7 +948,7 @@ app.get("/nests", async (req, res) => {
   }
 });
 
-// Get nest by nest_code
+// Get nest by nest_code endpoint
 app.get("/nests/:nest_code", async (req, res) => {
   try {
     const { nest_code } = req.params;
@@ -969,6 +976,8 @@ app.get("/nests/:nest_code", async (req, res) => {
   }
 });
 
+// Turtle nest events
+//---------------------------------------------------------------
 // Create Turtle Nest Event endpoint
 app.post("/nest-events/create", async (req, res) => {
   try {
@@ -1229,6 +1238,46 @@ app.post("/nest-events/create", async (req, res) => {
     });
   } catch (err) {
     console.error("Create turtle nest event error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Get all turtle nest events for a given nest_code
+app.get("/nest-events/:nest_code", async (req, res) => {
+  try {
+    const { nest_code } = req.params;
+
+    if (!nest_code) {
+      return res.status(400).json({ error: "nest_code is required." });
+    }
+
+    // Confirm nest exists
+    const nestResult = await db.query(
+      `SELECT id, nest_code FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
+      [nest_code]
+    );
+
+    if (nestResult.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const sql = `
+      SELECT *
+      FROM turtle_nest_events
+      WHERE nest_code = $1
+      ORDER BY created_at DESC;
+    `;
+
+    const result = await db.query(sql, [nest_code]);
+
+    res.json({
+      message: "Nest events retrieved successfully",
+      nest_code,
+      total_events: result.rows.length,
+      events: result.rows
+    });
+  } catch (err) {
+    console.error("Get nest events error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
