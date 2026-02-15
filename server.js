@@ -984,54 +984,142 @@ app.post("/nest-events/create", async (req, res) => {
     const {
       event_type,
       nest_code,
-      // ... existing fields ...
-      total_eggs,
-      helped_to_sea,
-      eggs_reburied,
       
-      // ADD THESE TWO
+      // The two new fields you wanted
       tracks_to_sea,
       tracks_lost,
 
-      // ... rest of your fields (hatched_count, notes, etc.)
+      original_depth_top_egg_h,
+      original_depth_bottom_chamber_h,
+      original_width_w,
+      original_distance_to_sea_s,
+      original_gps_lat,
+      original_gps_long,
+
+      total_eggs,
+      helped_to_sea,
+      eggs_reburied,
+
+      hatched_count,
+      hatched_black_fungus_count,
+      hatched_green_bacteria_count,
+      hatched_pink_bacteria_count,
+
+      non_viable_count,
+      non_viable_black_fungus_count,
+      non_viable_green_bacteria_count,
+      non_viable_pink_bacteria_count,
+
+      eye_spot_count,
+      eye_spot_black_fungus_count,
+      eye_spot_green_bacteria_count,
+      eye_spot_pink_bacteria_count,
+
+      early_count,
+      early_black_fungus_count,
+      early_green_bacteria_count,
+      early_pink_bacteria_count,
+
+      middle_count,
+      middle_black_fungus_count,
+      middle_green_bacteria_count,
+      middle_pink_bacteria_count,
+
+      late_count,
+      late_black_fungus_count,
+      late_green_bacteria_count,
+      late_pink_bacteria_count,
+
+      piped_dead_count,
+      piped_dead_black_fungus_count,
+      piped_dead_green_bacteria_count,
+      piped_dead_pink_bacteria_count,
+
+      piped_alive_count,
+      alive_within,
+      dead_within,
+      alive_above,
+      dead_above,
+
+      reburied_depth_top_egg_h,
+      reburied_depth_bottom_chamber_h,
+      reburied_width_w,
+      reburied_distance_to_sea_s,
+      reburied_gps_lat,
+      reburied_gps_long,
+
+      notes,
+      start_time,
+      end_time,
+      observer
     } = req.body;
 
-    // ... (Keep your existing validation and nest lookup) ...
+    if (!event_type || !nest_code) {
+      return res.status(400).json({ error: "event_type and nest_code are required." });
+    }
 
+    // 1. Find the nest to get the ID (Fixed the scope issue here)
+    const nestResult = await db.query(
+      `SELECT id FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
+      [nest_code]
+    );
+
+    if (nestResult.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const nest_id = nestResult.rows[0].id; // nest_id is now defined in this scope
+
+    // 2. Insert the event with the new fields
     const sql = `
       INSERT INTO turtle_nest_events (
-        event_type,
-        nest_id,
-        nest_code,
-        tracks_to_sea,    -- NEW
-        tracks_lost,      -- NEW
-        total_eggs,
-        -- ... all your other existing columns ...
+        event_type, nest_id, nest_code,
+        tracks_to_sea, tracks_lost,
+        original_depth_top_egg_h, original_depth_bottom_chamber_h, original_width_w,
+        original_distance_to_sea_s, original_gps_lat, original_gps_long,
+        total_eggs, helped_to_sea, eggs_reburied,
+        hatched_count, hatched_black_fungus_count, hatched_green_bacteria_count, hatched_pink_bacteria_count,
+        non_viable_count, non_viable_black_fungus_count, non_viable_green_bacteria_count, non_viable_pink_bacteria_count,
+        eye_spot_count, eye_spot_black_fungus_count, eye_spot_green_bacteria_count, eye_spot_pink_bacteria_count,
+        early_count, early_black_fungus_count, early_green_bacteria_count, early_pink_bacteria_count,
+        middle_count, middle_black_fungus_count, middle_green_bacteria_count, middle_pink_bacteria_count,
+        late_count, late_black_fungus_count, late_green_bacteria_count, late_pink_bacteria_count,
+        piped_dead_count, piped_dead_black_fungus_count, piped_dead_green_bacteria_count, piped_dead_pink_bacteria_count,
+        piped_alive_count, alive_within, dead_within, alive_above, dead_above,
+        reburied_depth_top_egg_h, reburied_depth_bottom_chamber_h, reburied_width_w,
+        reburied_distance_to_sea_s, reburied_gps_lat, reburied_gps_long,
+        notes, start_time, end_time, observer
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, -- Adjusted indices
-        -- ... increment all subsequent $ numbers ...
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57
       )
       RETURNING *;
     `;
 
-    // Ensure you update the values array to match the new order
     const values = [
-      event_type,
-      nest_id,
-      nest_code,
-      tracks_to_sea || 0, // NEW
-      tracks_lost || 0,   // NEW
-      total_eggs || null,
-      // ... the rest of your variables
+      event_type, nest_id, nest_code,
+      tracks_to_sea || 0, tracks_lost || 0,
+      original_depth_top_egg_h || null, original_depth_bottom_chamber_h || null, original_width_w || null,
+      original_distance_to_sea_s || null, original_gps_lat || null, original_gps_long || null,
+      total_eggs || null, helped_to_sea || null, eggs_reburied || null,
+      hatched_count || null, hatched_black_fungus_count || null, hatched_green_bacteria_count || null, hatched_pink_bacteria_count || null,
+      non_viable_count || null, non_viable_black_fungus_count || null, non_viable_green_bacteria_count || null, non_viable_pink_bacteria_count || null,
+      eye_spot_count || null, eye_spot_black_fungus_count || null, eye_spot_green_bacteria_count || null, eye_spot_pink_bacteria_count || null,
+      early_count || null, early_black_fungus_count || null, early_green_bacteria_count || null, early_pink_bacteria_count || null,
+      middle_count || null, middle_black_fungus_count || null, middle_green_bacteria_count || null, middle_pink_bacteria_count || null,
+      late_count || null, late_black_fungus_count || null, late_green_bacteria_count || null, late_pink_bacteria_count || null,
+      piped_dead_count || null, piped_dead_black_fungus_count || null, piped_dead_green_bacteria_count || null, piped_dead_pink_bacteria_count || null,
+      piped_alive_count || null, alive_within || null, dead_within || null, alive_above || null, dead_above || null,
+      reburied_depth_top_egg_h || null, reburied_depth_bottom_chamber_h || null, reburied_width_w || null,
+      reburied_distance_to_sea_s || null, reburied_gps_lat || null, reburied_gps_long || null,
+      notes || null, start_time || null, end_time || null, observer || null
     ];
 
     const result = await db.query(sql, values);
+    res.json({ message: "Turtle nest event created successfully", event: result.rows[0] });
 
-    res.json({
-      message: "Turtle nest event created successfully",
-      event: result.rows[0]
-    });
   } catch (err) {
     console.error("Create turtle nest event error:", err);
     res.status(500).json({ error: "Server error." });
