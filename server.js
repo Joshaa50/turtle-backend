@@ -1166,6 +1166,150 @@ app.get("/nest-events/:nest_code", async (req, res) => {
   }
 });
 
+// Update Nest Event endpoint
+app.put("/nest-events/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const {
+      event_type,
+      nest_id,
+      nest_code,
+      // Physical measurements
+      original_depth_top_egg_h,
+      original_depth_bottom_chamber_h,
+      original_width_w,
+      original_distance_to_sea_s,
+      original_gps_lat,
+      original_gps_long,
+      // Primary counts
+      total_eggs,
+      helped_to_sea,
+      eggs_reburied,
+      // Success/Failure categories
+      hatched_count,
+      hatched_black_fungus_count,
+      hatched_green_bacteria_count,
+      hatched_pink_bacteria_count,
+      non_viable_count,
+      non_viable_black_fungus_count,
+      non_viable_green_bacteria_count,
+      non_viable_pink_bacteria_count,
+      // Developmental stages
+      eye_spot_count,
+      eye_spot_black_fungus_count,
+      eye_spot_green_bacteria_count,
+      eye_spot_pink_bacteria_count,
+      early_count,
+      early_black_fungus_count,
+      early_green_bacteria_count,
+      early_pink_bacteria_count,
+      middle_count,
+      middle_black_fungus_count,
+      middle_green_bacteria_count,
+      middle_pink_bacteria_count,
+      late_count,
+      late_black_fungus_count,
+      late_green_bacteria_count,
+      late_pink_bacteria_count,
+      // Piped states
+      piped_dead_count,
+      piped_dead_black_fungus_count,
+      piped_dead_green_bacteria_count,
+      piped_dead_pink_bacteria_count,
+      piped_alive_count,
+      // Reburial data
+      reburied_depth_top_egg_h,
+      reburied_depth_bottom_chamber_h,
+      reburied_width_w,
+      reburied_distance_to_sea_s,
+      reburied_gps_lat,
+      reburied_gps_long,
+      // Metadata
+      notes,
+      start_time,
+      end_time,
+      observer,
+      // Tracks & Location counts
+      alive_within,
+      dead_within,
+      alive_above,
+      dead_above,
+      tracks_to_sea,
+      tracks_lost
+    } = req.body;
+
+    // Required fields validation
+    if (!event_type || !nest_id || !nest_code) {
+      return res.status(400).json({
+        error: "Missing required fields: event_type, nest_id, and nest_code are mandatory."
+      });
+    }
+
+    const sql = `
+      UPDATE turtle_nest_events
+      SET
+        event_type = $1, nest_id = $2, nest_code = $3,
+        original_depth_top_egg_h = $4, original_depth_bottom_chamber_h = $5,
+        original_width_w = $6, original_distance_to_sea_s = $7,
+        original_gps_lat = $8, original_gps_long = $9,
+        total_eggs = $10, helped_to_sea = $11, eggs_reburied = $12,
+        hatched_count = $13, hatched_black_fungus_count = $14, hatched_green_bacteria_count = $15, hatched_pink_bacteria_count = $16,
+        non_viable_count = $17, non_viable_black_fungus_count = $18, non_viable_green_bacteria_count = $19, non_viable_pink_bacteria_count = $20,
+        eye_spot_count = $21, eye_spot_black_fungus_count = $22, eye_spot_green_bacteria_count = $23, eye_spot_pink_bacteria_count = $24,
+        early_count = $25, early_black_fungus_count = $26, early_green_bacteria_count = $27, early_pink_bacteria_count = $28,
+        middle_count = $29, middle_black_fungus_count = $30, middle_green_bacteria_count = $31, middle_pink_bacteria_count = $32,
+        late_count = $33, late_black_fungus_count = $34, late_green_bacteria_count = $35, late_pink_bacteria_count = $36,
+        piped_dead_count = $37, piped_dead_black_fungus_count = $38, piped_dead_green_bacteria_count = $39, piped_dead_pink_bacteria_count = $40,
+        piped_alive_count = $41,
+        reburied_depth_top_egg_h = $42, reburied_depth_bottom_chamber_h = $43, reburied_width_w = $44,
+        reburied_distance_to_sea_s = $45, reburied_gps_lat = $46, reburied_gps_long = $47,
+        notes = $48, start_time = $49, end_time = $50, observer = $51,
+        alive_within = $52, dead_within = $53, alive_above = $54, dead_above = $55,
+        tracks_to_sea = $56, tracks_lost = $57,
+        updated_at = NOW()
+      WHERE id = $58
+      RETURNING *;
+    `;
+
+    const values = [
+      event_type, nest_id, nest_code,
+      original_depth_top_egg_h || null, original_depth_bottom_chamber_h || null,
+      original_width_w || null, original_distance_to_sea_s || null,
+      original_gps_lat || null, original_gps_long || null,
+      total_eggs ?? 0, helped_to_sea ?? 0, eggs_reburied ?? 0,
+      hatched_count ?? 0, hatched_black_fungus_count ?? 0, hatched_green_bacteria_count ?? 0, hatched_pink_bacteria_count ?? 0,
+      non_viable_count ?? 0, non_viable_black_fungus_count ?? 0, non_viable_green_bacteria_count ?? 0, non_viable_pink_bacteria_count ?? 0,
+      eye_spot_count ?? 0, eye_spot_black_fungus_count ?? 0, eye_spot_green_bacteria_count ?? 0, eye_spot_pink_bacteria_count ?? 0,
+      early_count ?? 0, early_black_fungus_count ?? 0, early_green_bacteria_count ?? 0, early_pink_bacteria_count ?? 0,
+      middle_count ?? 0, middle_black_fungus_count ?? 0, middle_green_bacteria_count ?? 0, middle_pink_bacteria_count ?? 0,
+      late_count ?? 0, late_black_fungus_count ?? 0, late_green_bacteria_count ?? 0, late_pink_bacteria_count ?? 0,
+      piped_dead_count ?? 0, piped_dead_black_fungus_count ?? 0, piped_dead_green_bacteria_count ?? 0, piped_dead_pink_bacteria_count ?? 0,
+      piped_alive_count ?? 0,
+      reburied_depth_top_egg_h || null, reburied_depth_bottom_chamber_h || null, reburied_width_w || null,
+      reburied_distance_to_sea_s || null, reburied_gps_lat || null, reburied_gps_long || null,
+      notes || null, start_time || null, end_time || null, observer || null,
+      alive_within ?? 0, dead_within ?? 0, alive_above ?? 0, dead_above ?? 0,
+      tracks_to_sea ?? 0, tracks_lost ?? 0,
+      id
+    ];
+
+    const result = await db.query(sql, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Event not found." });
+    }
+
+    res.json({
+      message: "Nest event updated successfully",
+      event: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Update nest event error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
