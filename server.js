@@ -79,7 +79,16 @@ app.post("/users/register", async (req, res) => {
 app.get("/users", async (req, res) => {
   try {
     const sql = `
-      SELECT id, first_name, last_name, email, role, email_verified, is_active, created_at, updated_at
+      SELECT 
+        id, 
+        first_name, 
+        last_name, 
+        email, 
+        role, 
+        is_email_verified,
+        is_active, 
+        created_at, 
+        updated_at
       FROM users
       ORDER BY id ASC;
     `;
@@ -91,6 +100,7 @@ app.get("/users", async (req, res) => {
       users: result.rows
     });
   } catch (err) {
+    // This will now catch things like connection issues instead of naming errors
     console.error("Get users error:", err);
     res.status(500).json({ error: "Server error." });
   }
