@@ -1331,7 +1331,8 @@ app.post("/emergences", async (req, res) => {
       distance_to_sea_s, 
       gps_lat, 
       gps_long, 
-      event_date 
+      event_date,
+      beach // New field
     } = req.body;
 
     // Basic Validation
@@ -1340,8 +1341,8 @@ app.post("/emergences", async (req, res) => {
     }
 
     const sql = `
-      INSERT INTO turtle_emergences (distance_to_sea_s, gps_lat, gps_long, event_date)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO turtle_emergences (distance_to_sea_s, gps_lat, gps_long, event_date, beach)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *;
     `;
 
@@ -1349,7 +1350,8 @@ app.post("/emergences", async (req, res) => {
       distance_to_sea_s || null,
       gps_lat || null,
       gps_long || null,
-      event_date
+      event_date,
+      beach || null
     ]);
 
     res.status(201).json({
@@ -1366,7 +1368,7 @@ app.post("/emergences", async (req, res) => {
 app.get("/emergences", async (req, res) => {
   try {
     const sql = `
-      SELECT id, distance_to_sea_s, gps_lat, gps_long, event_date, created_at, updated_at
+      SELECT id, distance_to_sea_s, gps_lat, gps_long, event_date, beach, created_at, updated_at
       FROM turtle_emergences
       ORDER BY event_date DESC;
     `;
