@@ -1321,6 +1321,68 @@ app.put("/nest-events/:id", async (req, res) => {
 });
 
 
+// Turtle Emergences table
+//---------------------------------------------------------------
+
+// Create a new turtle emergence
+app.post("/emergences", async (req, res) => {
+  try {
+    const { 
+      distance_to_sea_s, 
+      gps_lat, 
+      gps_long, 
+      event_date 
+    } = req.body;
+
+    // Basic Validation
+    if (!event_date) {
+      return res.status(400).json({ error: "event_date is required." });
+    }
+
+    const sql = `
+      INSERT INTO turtle_emergences (distance_to_sea_s, gps_lat, gps_long, event_date)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [
+      distance_to_sea_s || null,
+      gps_lat || null,
+      gps_long || null,
+      event_date
+    ]);
+
+    res.status(201).json({
+      message: "Emergence recorded successfully",
+      emergence: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Create emergence error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Get all turtle emergences
+app.get("/emergences", async (req, res) => {
+  try {
+    const sql = `
+      SELECT id, distance_to_sea_s, gps_lat, gps_long, event_date, created_at, updated_at
+      FROM turtle_emergences
+      ORDER BY event_date DESC;
+    `;
+
+    const result = await db.query(sql);
+
+    res.json({
+      message: "Emergences fetched successfully",
+      emergences: result.rows
+    });
+  } catch (err) {
+    console.error("Get emergences error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
