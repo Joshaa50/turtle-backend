@@ -1385,6 +1385,32 @@ app.get("/emergences", async (req, res) => {
   }
 });
 
+// shifts table
+//---------------------------------------------------------------
+
+// Get all shifts
+app.get("/shifts", async (req, res) => {
+  try {
+    // Assuming you have a 'shifts' table, similar to 'turtle_nests'
+    const sql = `
+      SELECT *
+      FROM shifts
+      ORDER BY shift_date DESC, start_time DESC;
+    `;
+
+    const result = await db.query(sql);
+
+    res.json({
+      message: "Shifts retrieved successfully",
+      total_shifts: result.rows.length,
+      shifts: result.rows
+    });
+  } catch (err) {
+    console.error("Get shifts error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
