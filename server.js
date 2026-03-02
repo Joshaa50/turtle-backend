@@ -1409,8 +1409,11 @@ app.get("/shifts", async (req, res) => {
   }
 });
 
+//Timetable table
+//--------------------------------------------------------------
+
 // Create a shift
-app.post('/shifts/create', async (req, res) => {
+app.post('/timetable/create', async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
   // Basic validation
