@@ -1484,6 +1484,40 @@ app.get("/timetable/week", async (req, res) => {
   }
 });
 
+// Delete a specific assignment from the timetable based on user, date, and task
+app.delete("/timetable/remove", async (req, res) => {
+  const { user_id, shift_id, work_date } = req.body;
+
+  // Basic validation
+  if (!user_id || !shift_id || !work_date) {
+    return res.status(400).json({ error: "Missing required fields: user_id, shift_id, work_date" });
+  }
+
+  try {
+    const sql = `
+      DELETE FROM Timetable 
+      WHERE user_id = $1 
+        AND shift_id = $2 
+        AND work_date = $3
+      RETURNING *;
+    `;
+
+    const result = await db.query(sql, [user_id, shift_id, work_date]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Assignment not found for the given criteria." });
+    }
+
+    res.json({
+      message: "Assignment deleted successfully",
+      deleted_assignment: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Delete assignment error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
