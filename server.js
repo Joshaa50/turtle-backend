@@ -1391,11 +1391,9 @@ app.get("/emergences", async (req, res) => {
 // Get all shifts
 app.get("/shifts", async (req, res) => {
   try {
-    // Assuming you have a 'shifts' table, similar to 'turtle_nests'
     const sql = `
       SELECT *
-      FROM shifts
-      ORDER BY shift_date DESC, start_time DESC;
+      FROM shifts             
     `;
 
     const result = await db.query(sql);
@@ -1408,6 +1406,32 @@ app.get("/shifts", async (req, res) => {
   } catch (err) {
     console.error("Get shifts error:", err);
     res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Create a shift
+app.post('/shifts/create', async (req, res) => {
+  const { user_id, shift_id, work_date } = req.body;
+
+  // Basic validation
+  if (!user_id || !shift_id || !work_date) {
+    return res.status(400).json({ error: 'Missing required fields: user_id, shift_id, work_date' });
+  }
+
+  try {
+    const query = `
+      INSERT INTO Timetable (user_id, shift_id, work_date)
+      VALUES ($1, $2, $3)
+      RETURNING *;
+    `;
+    const values = [user_id, shift_id, work_date];
+    const result = await pool.query(query, values);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    // Handles database constraints (like foreign key violations or unique constraint violations)
+    res.status(500).json({ error: 'Database error. Check if user_id and shift_id exist.' });
   }
 });
 
