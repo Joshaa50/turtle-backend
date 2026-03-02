@@ -1443,6 +1443,47 @@ app.post('/timetable/create', async (req, res) => {
   }
 });
 
+// Get timetable for a specific week (given the date of the Monday)
+app.get("/timetable/week", async (req, res) => {
+  const { monday_date } = req.query;
+
+  if (!monday_date) {
+    return res.status(400).json({ error: "monday_date is required (YYYY-MM-DD)." });
+  }
+
+  try {
+    const sql = `
+      SELECT 
+        t.assignment_id,
+        t.work_date,
+        t.status,
+        u.first_name,
+        u.last_name,
+        s.shift_name,
+        s.shift_type,
+        s.start_time,
+        s.end_time
+      FROM Timetable t
+      JOIN Users u ON t.user_id = u.id
+      JOIN Shifts s ON t.shift_id = s.shift_id
+      WHERE t.work_date >= $1::date 
+        AND t.work_date < ($1::date + INTERVAL '7 days')
+      ORDER BY t.work_date ASC, s.start_time ASC;
+    `;
+
+    const result = await db.query(sql, [monday_date]);
+
+    res.json({
+      message: "Weekly timetable retrieved successfully",
+      week_starting: monday_date,
+      schedule: result.rows
+    });
+  } catch (err) {
+    console.error("Get weekly timetable error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 
 
 
