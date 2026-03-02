@@ -1412,7 +1412,7 @@ app.get("/shifts", async (req, res) => {
 //Timetable table
 //--------------------------------------------------------------
 
-// Create a shift
+// Create a new shift assignment
 app.post('/timetable/create', async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
@@ -1428,16 +1428,20 @@ app.post('/timetable/create', async (req, res) => {
       RETURNING *;
     `;
     const values = [user_id, shift_id, work_date];
-    const result = await pool.query(query, values);
+    
+    // FIX: Changed 'pool.query' to 'db.query' to match your setup
+    const result = await db.query(query, values);
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json({
+      message: "Assignment created successfully",
+      assignment: result.rows[0]
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Create assignment error:", err);
     // Handles database constraints (like foreign key violations or unique constraint violations)
     res.status(500).json({ error: 'Database error. Check if user_id and shift_id exist.' });
   }
 });
-
 
 
 
