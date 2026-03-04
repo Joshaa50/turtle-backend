@@ -35,21 +35,22 @@ app.get("/test", (req, res) => {
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
-    const { first_name, last_name, email, password, role } = req.body;
+    // 1. Added 'station' to the incoming body
+    const { first_name, last_name, email, password, role, station } = req.body;
 
-    if (!first_name || !last_name || !email || !password) {
-      return res.status(400).json({ error: "Missing required fields." });
+    // 2. Updated validation to make station required
+    if (!first_name || !last_name || !email || !password || !station) {
+      return res.status(400).json({ error: "Missing required fields (including station)." });
     }
 
     const userRole = role || "volunteer";
-
     const password_hash = await bcrypt.hash(password, 10);
 
     const sql = `
       INSERT INTO users
-        (first_name, last_name, email, password_hash, role)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, first_name, last_name, email, role, is_email_verified, is_active, created_at;
+        (first_name, last_name, email, password_hash, role, station)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, first_name, last_name, email, role, station, created_at;
     `;
 
     const result = await db.query(sql, [
@@ -57,7 +58,8 @@ app.post("/users/register", async (req, res) => {
       last_name,
       email,
       password_hash,
-      userRole
+      userRole,
+      station // 3. Pass station to the DB
     ]);
 
     res.json({
@@ -66,11 +68,9 @@ app.post("/users/register", async (req, res) => {
     });
   } catch (err) {
     console.error("Register error:", err);
-
     if (err.code === "23505") {
       return res.status(400).json({ error: "Email already exists." });
     }
-
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -85,12 +85,11 @@ app.get("/users", async (req, res) => {
         last_name, 
         email, 
         role, 
-        is_email_verified,
+        station,  -- Added station here
         is_active, 
-        created_at, 
-        updated_at
+        created_at
       FROM users
-      ORDER BY id ASC;
+      ORDER BY station ASC, last_name ASC; -- Organized by station first
     `;
 
     const result = await db.query(sql);
@@ -100,7 +99,6 @@ app.get("/users", async (req, res) => {
       users: result.rows
     });
   } catch (err) {
-    // This will now catch things like connection issues instead of naming errors
     console.error("Get users error:", err);
     res.status(500).json({ error: "Server error." });
   }
@@ -137,6 +135,56 @@ app.post("/users/login", async (req, res) => {
     });
   } catch (err) {
     console.error("Login error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Update user endpoint
+app.patch("/users/:id", async (req, res) => {
+  const userId = req.params.id;
+  const updates = req.body;
+
+  // 1. Prevent updating sensitive fields like password or id through this general route
+  const forbiddenFields = ["id", "password_hash", "created_at"];
+  const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
+
+  if (keys.length === 0) {
+    return res.status(400).json({ error: "No valid fields provided for update." });
+  }
+
+  try {
+    // 2. Dynamically build the SQL query
+    // This maps keys to $1, $2, etc., based on their index
+    const setClause = keys
+      .map((key, index) => `${key} = $${index + 1}`)
+      .join(", ");
+
+    const sql = `
+      UPDATE users 
+      SET ${setClause} 
+      WHERE id = $${keys.length + 1} 
+      RETURNING id, first_name, last_name, email, role, station, is_active;
+    `;
+
+    // 3. Prepare the values array
+    const values = keys.map(key => updates[key]);
+    values.push(userId); // Add the ID at the end for the WHERE clause
+
+    const result = await db.query(sql, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    res.json({
+      message: "User updated successfully",
+      user: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Update error:", err);
+    if (err.code === "23505") {
+      return res.status(400).json({ error: "Email already in use by another account." });
+    }
     res.status(500).json({ error: "Server error." });
   }
 });
