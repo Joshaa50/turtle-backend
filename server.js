@@ -80,14 +80,7 @@ app.get("/users", async (req, res) => {
   try {
     const sql = `
       SELECT 
-        id, 
-        first_name, 
-        last_name, 
-        email, 
-        role, 
-        station,  -- Added station here
-        is_active, 
-        created_at
+        *
       FROM users
       ORDER BY station ASC, last_name ASC; -- Organized by station first
     `;
