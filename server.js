@@ -1559,6 +1559,38 @@ app.delete("/timetable/remove", async (req, res) => {
   }
 });
 
+//Beaches table
+//---------------------------------------------------------------
+
+// Get all beaches
+app.get("/beaches", async (req, res) => {
+  try {
+    const sql = `
+      SELECT 
+        id, 
+        name, 
+        code, 
+        station, 
+        survey_area, 
+        is_active, 
+        created_at
+      FROM beaches
+      ORDER BY station ASC, survey_area ASC, name ASC;
+    `;
+
+    const result = await db.query(sql);
+
+    res.json({
+      message: "Beaches fetched successfully",
+      count: result.rowCount,
+      beaches: result.rows
+    });
+  } catch (err) {
+    console.error("Get beaches error:", err);
+    res.status(500).json({ error: "Server error while fetching beaches." });
+  }
+});
+
 
 
 
