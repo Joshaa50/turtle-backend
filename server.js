@@ -1591,6 +1591,77 @@ app.get("/beaches", async (req, res) => {
   }
 });
 
+// Morning survey table
+//-------------------------------------------------------------------
+
+// POST: Create a new morning survey record
+app.post("/morning-surveys", async (req, res) => {
+  try {
+    const {
+      survey_date,
+      start_time,
+      end_time,
+      beach_id,
+      tl_lat,
+      tl_long,
+      tr_lat,
+      tr_long,
+      protected_nest_count,
+      notes,
+      nest_id,
+      event_id
+    } = req.body;
+
+    // 1. Basic Validation (Crucial for scientific data integrity)
+    if (!survey_date || !start_time || !end_time || !beach_id) {
+      return res.status(400).json({ error: "Missing required survey metadata." });
+    }
+
+    // 2. SQL Query using the decimal formatting we established
+    const sql = `
+      INSERT INTO morning_surveys (
+        survey_date, start_time, end_time, beach_id, 
+        tl_lat, tl_long, tr_lat, tr_long, 
+        protected_nest_count, notes, nest_id, event_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING *;
+    `;
+
+    // 3. Precision handling: ensuring the coordinates are sent as numbers
+    const values = [
+      survey_date,
+      start_time,
+      end_time,
+      beach_id,
+      tl_lat ? parseFloat(tl_lat).toFixed(5) : null,
+      tl_long ? parseFloat(tl_long).toFixed(5) : null,
+      tr_lat ? parseFloat(tr_lat).toFixed(5) : null,
+      tr_long ? parseFloat(tr_long).toFixed(5) : null,
+      protected_nest_count || 0,
+      notes,
+      nest_id || null,
+      event_id || null
+    ];
+
+    const result = await db.query(sql, values);
+
+    res.status(201).json({
+      message: "Morning survey recorded successfully",
+      survey: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error("Error creating survey:", err);
+    
+    // Catching Foreign Key violations (e.g., if beach_id doesn't exist)
+    if (err.code === '23503') {
+      return res.status(400).json({ error: "Invalid Beach, Nest, or Event ID." });
+    }
+
+    res.status(500).json({ error: "Server error while saving survey." });
+  }
+});
 
 
 
