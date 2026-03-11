@@ -6,7 +6,10 @@ const bcrypt = require("bcrypt");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// app.use(express.json());
+// // Add this near the top of your server.js
+app.use(express.json({ limit: '10mb' })); 
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Connect to Neon
 const db = new Pool({
@@ -35,10 +38,8 @@ app.get("/test", (req, res) => {
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
-    // 1. Added 'station' to the incoming body
     const { first_name, last_name, email, password, role, station } = req.body;
 
-    // 2. Updated validation to make station required
     if (!first_name || !last_name || !email || !password || !station) {
       return res.status(400).json({ error: "Missing required fields (including station)." });
     }
@@ -59,7 +60,7 @@ app.post("/users/register", async (req, res) => {
       email,
       password_hash,
       userRole,
-      station // 3. Pass station to the DB
+      station
     ]);
 
     res.json({
@@ -82,7 +83,7 @@ app.get("/users", async (req, res) => {
       SELECT 
         *
       FROM users
-      ORDER BY station ASC, last_name ASC; -- Organized by station first
+      ORDER BY station ASC, last_name ASC;
     `;
 
     const result = await db.query(sql);
@@ -137,7 +138,6 @@ app.patch("/users/:id", async (req, res) => {
   const userId = req.params.id;
   const updates = req.body;
 
-  // 1. Prevent updating sensitive fields like password or id through this general route
   const forbiddenFields = ["id", "password_hash", "created_at"];
   const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
 
@@ -146,8 +146,6 @@ app.patch("/users/:id", async (req, res) => {
   }
 
   try {
-    // 2. Dynamically build the SQL query
-    // This maps keys to $1, $2, etc., based on their index
     const setClause = keys
       .map((key, index) => `${key} = $${index + 1}`)
       .join(", ");
@@ -159,9 +157,8 @@ app.patch("/users/:id", async (req, res) => {
       RETURNING id, first_name, last_name, email, role, station, is_active;
     `;
 
-    // 3. Prepare the values array
     const values = keys.map(key => updates[key]);
-    values.push(userId); // Add the ID at the end for the WHERE clause
+    values.push(userId);
 
     const result = await db.query(sql, values);
 
@@ -218,17 +215,14 @@ app.post("/turtles/create", async (req, res) => {
       total_tail_length
     } = req.body;
 
-    // Normalize sex to satisfy CHECK constraint
     sex = sex ? sex.toLowerCase() : "unknown";
 
-    // Validate sex
     if (!["male", "female", "unknown"].includes(sex)) {
       return res.status(400).json({
         error: "sex must be 'male', 'female', or 'unknown'"
       });
     }
 
-    // Validate required fields
     if (
       !species ||
       !health_condition ||
@@ -328,7 +322,6 @@ app.post("/turtles/create", async (req, res) => {
     });
   } catch (err) {
     console.error("Create turtle error:", err);
-
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -347,6 +340,7 @@ app.get("/turtles", async (req, res) => {
     res.status(500).json({ error: "Server error." });
   }
 });
+
 // Get all survey events for a specific turtle
 app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
   try {
@@ -412,7 +406,6 @@ app.put("/turtles/:id/update", async (req, res) => {
       total_tail_length
     } = req.body;
 
-    // Validation (health + all measurement fields required)
     if (
       !health_condition ||
       scl_max == null ||
@@ -571,7 +564,6 @@ app.post("/turtle_survey_events/create", async (req, res) => {
       time_reach_sea
     } = req.body;
 
-    // Required field validation
     const requiredFields = [
       "event_type", "location", "turtle_id",
       "scl_max", "scl_min", "scw",
@@ -680,8 +672,18 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 });
 
 
-// Turtle nests 
+// Turtle nests
 //--------------------------------------------------------------
+
+// NOTE: Images are accepted as base64-encoded strings in the JSON body.
+// On the client side, read the file and convert it like so:
+//   const base64 = await new Promise(resolve => {
+//     const reader = new FileReader();
+//     reader.onload = () => resolve(reader.result.split(',')[1]);
+//     reader.readAsDataURL(file);
+//   });
+// Then include tri_tl_img and/or tri_tr_img as base64 strings in your POST/PUT body.
+
 // Create Nest endpoint
 app.post("/nests/create", async (req, res) => {
   try {
@@ -714,6 +716,14 @@ app.post("/nests/create", async (req, res) => {
       beach,
       notes
     } = req.body;
+
+    // Convert base64 image strings to Buffers for BYTEA storage
+    const tri_tl_img = req.body.tri_tl_img
+      ? Buffer.from(req.body.tri_tl_img, "base64")
+      : null;
+    const tri_tr_img = req.body.tri_tr_img
+      ? Buffer.from(req.body.tri_tr_img, "base64")
+      : null;
 
     // Required fields validation
     if (
@@ -760,11 +770,13 @@ app.post("/nests/create", async (req, res) => {
         tri_tl_lat,
         tri_tl_long,
         tri_tl_distance,
+        tri_tl_img,
 
         tri_tr_desc,
         tri_tr_lat,
         tri_tr_long,
         tri_tr_distance,
+        tri_tr_img,
 
         status,
         relocated,
@@ -775,9 +787,9 @@ app.post("/nests/create", async (req, res) => {
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,
-        $10,$11,$12,$13,
-        $14,$15,$16,$17,
-        $18,$19,$20,$21,$22,$23
+        $10,$11,$12,$13,$14,
+        $15,$16,$17,$18,$19,
+        $20,$21,$22,$23,$24,$25
       )
       RETURNING *;
     `;
@@ -797,11 +809,13 @@ app.post("/nests/create", async (req, res) => {
       tri_tl_lat || null,
       tri_tl_long || null,
       tri_tl_distance || null,
+      tri_tl_img,
 
       tri_tr_desc || null,
       tri_tr_lat || null,
       tri_tr_long || null,
       tri_tr_distance || null,
+      tri_tr_img,
 
       nestStatus,
       relocated ?? false,
@@ -863,6 +877,14 @@ app.put("/nests/:id/update", async (req, res) => {
       notes
     } = req.body;
 
+    // Convert base64 image strings to Buffers for BYTEA storage
+    const tri_tl_img = req.body.tri_tl_img
+      ? Buffer.from(req.body.tri_tl_img, "base64")
+      : null;
+    const tri_tr_img = req.body.tri_tr_img
+      ? Buffer.from(req.body.tri_tr_img, "base64")
+      : null;
+
     // Required fields validation
     if (
       !nest_code ||
@@ -906,21 +928,23 @@ app.put("/nests/:id/update", async (req, res) => {
         tri_tl_lat = $11,
         tri_tl_long = $12,
         tri_tl_distance = $13,
+        tri_tl_img = $14,
 
-        tri_tr_desc = $14,
-        tri_tr_lat = $15,
-        tri_tr_long = $16,
-        tri_tr_distance = $17,
+        tri_tr_desc = $15,
+        tri_tr_lat = $16,
+        tri_tr_long = $17,
+        tri_tr_distance = $18,
+        tri_tr_img = $19,
 
-        status = $18,
-        relocated = $19,
-        is_archived = $20,
-        date_found = $21,
-        beach = $22,
-        notes = $23,
+        status = $20,
+        relocated = $21,
+        is_archived = $22,
+        date_found = $23,
+        beach = $24,
+        notes = $25,
 
         updated_at = NOW()
-      WHERE id = $24
+      WHERE id = $26
       RETURNING *;
     `;
 
@@ -940,11 +964,13 @@ app.put("/nests/:id/update", async (req, res) => {
       tri_tl_lat || null,
       tri_tl_long || null,
       tri_tl_distance || null,
+      tri_tl_img,
 
       tri_tr_desc || null,
       tri_tr_lat || null,
       tri_tr_long || null,
       tri_tr_distance || null,
+      tri_tr_img,
 
       nestStatus,
       relocated ?? false,
@@ -977,12 +1003,19 @@ app.put("/nests/:id/update", async (req, res) => {
   }
 });
 
-
 // Get all nests endpoint
+// Images excluded for performance â€” fetched individually via the single nest endpoint
 app.get("/nests", async (req, res) => {
   try {
     const sql = `
-      SELECT *
+      SELECT
+        id, nest_code, total_num_eggs, current_num_eggs,
+        depth_top_egg_h, depth_bottom_chamber_h, distance_to_sea_s, width_w,
+        gps_long, gps_lat,
+        tri_tl_desc, tri_tl_lat, tri_tl_long, tri_tl_distance,
+        tri_tr_desc, tri_tr_lat, tri_tr_long, tri_tr_distance,
+        status, relocated, is_archived, date_found, beach, notes,
+        created_at, updated_at
       FROM turtle_nests
       ORDER BY date_found DESC, id DESC;
     `;
@@ -1000,6 +1033,7 @@ app.get("/nests", async (req, res) => {
 });
 
 // Get nest by nest_code endpoint
+// Images returned as base64 strings for use in <img src="data:image/jpeg;base64,...">
 app.get("/nests/:nest_code", async (req, res) => {
   try {
     const { nest_code } = req.params;
@@ -1017,9 +1051,19 @@ app.get("/nests/:nest_code", async (req, res) => {
       return res.status(404).json({ error: "Nest not found" });
     }
 
+    const nest = result.rows[0];
+
+    // Convert BYTEA buffers to base64 strings for JSON transport
+    if (nest.tri_tl_img) {
+      nest.tri_tl_img = nest.tri_tl_img.toString("base64");
+    }
+    if (nest.tri_tr_img) {
+      nest.tri_tr_img = nest.tri_tr_img.toString("base64");
+    }
+
     res.json({
       message: "Nest found",
-      nest: result.rows[0]
+      nest
     });
   } catch (err) {
     console.error("Get nest error:", err);
@@ -1036,7 +1080,6 @@ app.post("/nest-events/create", async (req, res) => {
       event_type,
       nest_code,
       
-      // The two new fields you wanted
       tracks_to_sea,
       tracks_lost,
 
@@ -1109,7 +1152,6 @@ app.post("/nest-events/create", async (req, res) => {
       return res.status(400).json({ error: "event_type and nest_code are required." });
     }
 
-    // 1. Find the nest to get the ID (Fixed the scope issue here)
     const nestResult = await db.query(
       `SELECT id FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
       [nest_code]
@@ -1119,9 +1161,8 @@ app.post("/nest-events/create", async (req, res) => {
       return res.status(404).json({ error: "Nest not found." });
     }
 
-    const nest_id = nestResult.rows[0].id; // nest_id is now defined in this scope
+    const nest_id = nestResult.rows[0].id;
 
-    // 2. Insert the event with the new fields
     const sql = `
       INSERT INTO turtle_nest_events (
         event_type, nest_id, nest_code,
@@ -1186,7 +1227,6 @@ app.get("/nest-events/:nest_code", async (req, res) => {
       return res.status(400).json({ error: "nest_code is required." });
     }
 
-    // Confirm nest exists
     const nestResult = await db.query(
       `SELECT id, nest_code FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
       [nest_code]
@@ -1226,18 +1266,15 @@ app.put("/nest-events/:id", async (req, res) => {
       event_type,
       nest_id,
       nest_code,
-      // Physical measurements
       original_depth_top_egg_h,
       original_depth_bottom_chamber_h,
       original_width_w,
       original_distance_to_sea_s,
       original_gps_lat,
       original_gps_long,
-      // Primary counts
       total_eggs,
       helped_to_sea,
       eggs_reburied,
-      // Success/Failure categories
       hatched_count,
       hatched_black_fungus_count,
       hatched_green_bacteria_count,
@@ -1246,7 +1283,6 @@ app.put("/nest-events/:id", async (req, res) => {
       non_viable_black_fungus_count,
       non_viable_green_bacteria_count,
       non_viable_pink_bacteria_count,
-      // Developmental stages
       eye_spot_count,
       eye_spot_black_fungus_count,
       eye_spot_green_bacteria_count,
@@ -1263,25 +1299,21 @@ app.put("/nest-events/:id", async (req, res) => {
       late_black_fungus_count,
       late_green_bacteria_count,
       late_pink_bacteria_count,
-      // Piped states
       piped_dead_count,
       piped_dead_black_fungus_count,
       piped_dead_green_bacteria_count,
       piped_dead_pink_bacteria_count,
       piped_alive_count,
-      // Reburial data
       reburied_depth_top_egg_h,
       reburied_depth_bottom_chamber_h,
       reburied_width_w,
       reburied_distance_to_sea_s,
       reburied_gps_lat,
       reburied_gps_long,
-      // Metadata
       notes,
       start_time,
       end_time,
       observer,
-      // Tracks & Location counts
       alive_within,
       dead_within,
       alive_above,
@@ -1290,7 +1322,6 @@ app.put("/nest-events/:id", async (req, res) => {
       tracks_lost
     } = req.body;
 
-    // Required fields validation
     if (!event_type || !nest_id || !nest_code) {
       return res.status(400).json({
         error: "Missing required fields: event_type, nest_id, and nest_code are mandatory."
@@ -1373,10 +1404,9 @@ app.post("/emergences", async (req, res) => {
       gps_lat, 
       gps_long, 
       event_date,
-      beach // New field
+      beach
     } = req.body;
 
-    // Basic Validation
     if (!event_date) {
       return res.status(400).json({ error: "event_date is required." });
     }
@@ -1426,7 +1456,7 @@ app.get("/emergences", async (req, res) => {
   }
 });
 
-// shifts table
+// Shifts table
 //---------------------------------------------------------------
 
 // Get all shifts
@@ -1450,14 +1480,13 @@ app.get("/shifts", async (req, res) => {
   }
 });
 
-//Timetable table
+// Timetable table
 //--------------------------------------------------------------
 
 // Create a new shift assignment
 app.post('/timetable/create', async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
-  // Basic validation
   if (!user_id || !shift_id || !work_date) {
     return res.status(400).json({ error: 'Missing required fields: user_id, shift_id, work_date' });
   }
@@ -1470,7 +1499,6 @@ app.post('/timetable/create', async (req, res) => {
     `;
     const values = [user_id, shift_id, work_date];
     
-    // FIX: Changed 'pool.query' to 'db.query' to match your setup
     const result = await db.query(query, values);
 
     res.status(201).json({
@@ -1479,7 +1507,6 @@ app.post('/timetable/create', async (req, res) => {
     });
   } catch (err) {
     console.error("Create assignment error:", err);
-    // Handles database constraints (like foreign key violations or unique constraint violations)
     res.status(500).json({ error: 'Database error. Check if user_id and shift_id exist.' });
   }
 });
@@ -1525,11 +1552,10 @@ app.get("/timetable/week", async (req, res) => {
   }
 });
 
-// Delete a specific assignment from the timetable based on user, date, and task
+// Delete a specific assignment from the timetable
 app.delete("/timetable/remove", async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
-  // Basic validation
   if (!user_id || !shift_id || !work_date) {
     return res.status(400).json({ error: "Missing required fields: user_id, shift_id, work_date" });
   }
@@ -1559,7 +1585,7 @@ app.delete("/timetable/remove", async (req, res) => {
   }
 });
 
-//Beaches table
+// Beaches table
 //---------------------------------------------------------------
 
 // Get all beaches
@@ -1612,12 +1638,10 @@ app.post("/morning-surveys", async (req, res) => {
       event_id
     } = req.body;
 
-    // 1. Basic Validation (Crucial for scientific data integrity)
     if (!survey_date || !start_time || !end_time || !beach_id) {
       return res.status(400).json({ error: "Missing required survey metadata." });
     }
 
-    // 2. SQL Query using the decimal formatting we established
     const sql = `
       INSERT INTO morning_surveys (
         survey_date, start_time, end_time, beach_id, 
@@ -1628,7 +1652,6 @@ app.post("/morning-surveys", async (req, res) => {
       RETURNING *;
     `;
 
-    // 3. Precision handling: ensuring the coordinates are sent as numbers
     const values = [
       survey_date,
       start_time,
@@ -1654,7 +1677,6 @@ app.post("/morning-surveys", async (req, res) => {
   } catch (err) {
     console.error("Error creating survey:", err);
     
-    // Catching Foreign Key violations (e.g., if beach_id doesn't exist)
     if (err.code === '23503') {
       return res.status(400).json({ error: "Invalid Beach, Nest, or Event ID." });
     }
@@ -1662,9 +1684,6 @@ app.post("/morning-surveys", async (req, res) => {
     res.status(500).json({ error: "Server error while saving survey." });
   }
 });
-
-
-
 
 
 // Start server
