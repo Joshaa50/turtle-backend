@@ -6,14 +6,16 @@ const bcrypt = require("bcrypt");
 
 const app = express();
 app.use(cors());
+// app.use(express.json());
+// // Add this near the top of your server.js
 app.use(express.json({ limit: '10mb' })); 
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Connect to Neon
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  family: 4
+  ssl: { rejectUnauthorized: false }, // Neon requires SSL
+  family: 4 // Force IPv4 for Render
 });
 
 // Test DB connection
@@ -680,8 +682,7 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 //     reader.onload = () => resolve(reader.result.split(',')[1]);
 //     reader.readAsDataURL(file);
 //   });
-// Then include tri_tl_img, tri_tr_img, and/or track_sketch as base64 strings in your POST/PUT body.
-// For multiple track photos, use the POST /nests/:nest_id/track-photos endpoint.
+// Then include tri_tl_img and/or tri_tr_img as base64 strings in your POST/PUT body.
 
 // Create Nest endpoint
 app.post("/nests/create", async (req, res) => {
@@ -722,9 +723,6 @@ app.post("/nests/create", async (req, res) => {
       : null;
     const tri_tr_img = req.body.tri_tr_img
       ? Buffer.from(req.body.tri_tr_img, "base64")
-      : null;
-    const track_sketch = req.body.track_sketch
-      ? Buffer.from(req.body.track_sketch, "base64")
       : null;
 
     // Required fields validation
@@ -785,14 +783,13 @@ app.post("/nests/create", async (req, res) => {
         is_archived,
         date_found,
         beach,
-        notes,
-        track_sketch
+        notes
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,
         $10,$11,$12,$13,$14,
         $15,$16,$17,$18,$19,
-        $20,$21,$22,$23,$24,$25,$26
+        $20,$21,$22,$23,$24,$25
       )
       RETURNING *;
     `;
@@ -825,8 +822,7 @@ app.post("/nests/create", async (req, res) => {
       is_archived ?? false,
       date_found,
       beach,
-      notes || null,
-      track_sketch
+      notes || null
     ]);
 
     res.json({
@@ -888,9 +884,6 @@ app.put("/nests/:id/update", async (req, res) => {
     const tri_tr_img = req.body.tri_tr_img
       ? Buffer.from(req.body.tri_tr_img, "base64")
       : null;
-    const track_sketch = req.body.track_sketch
-      ? Buffer.from(req.body.track_sketch, "base64")
-      : null;
 
     // Required fields validation
     if (
@@ -949,10 +942,9 @@ app.put("/nests/:id/update", async (req, res) => {
         date_found = $23,
         beach = $24,
         notes = $25,
-        track_sketch = $26,
 
         updated_at = NOW()
-      WHERE id = $27
+      WHERE id = $26
       RETURNING *;
     `;
 
@@ -986,7 +978,6 @@ app.put("/nests/:id/update", async (req, res) => {
       date_found,
       beach,
       notes || null,
-      track_sketch,
 
       id
     ]);
@@ -1069,9 +1060,6 @@ app.get("/nests/:nest_code", async (req, res) => {
     if (nest.tri_tr_img) {
       nest.tri_tr_img = nest.tri_tr_img.toString("base64");
     }
-    if (nest.track_sketch) {
-      nest.track_sketch = nest.track_sketch.toString("base64");
-    }
 
     res.json({
       message: "Nest found",
@@ -1079,122 +1067,6 @@ app.get("/nests/:nest_code", async (req, res) => {
     });
   } catch (err) {
     console.error("Get nest error:", err);
-    res.status(500).json({ error: "Server error." });
-  }
-});
-
-// Nest Track Photos table
-//---------------------------------------------------------------
-
-// Add a track photo to a nest
-// Accepts photo as a base64 string, photo_type must be 'track' or 'hatchling_track'
-app.post("/nests/:nest_id/track-photos", async (req, res) => {
-  try {
-    const { nest_id } = req.params;
-    const { photo_type, caption, taken_at } = req.body;
-
-    if (!req.body.photo) {
-      return res.status(400).json({ error: "photo (base64) is required." });
-    }
-
-    const validTypes = ["track", "hatchling_track"];
-    if (!photo_type || !validTypes.includes(photo_type)) {
-      return res.status(400).json({
-        error: "photo_type must be 'track' or 'hatchling_track'."
-      });
-    }
-
-    const photo = Buffer.from(req.body.photo, "base64");
-
-    const sql = `
-      INSERT INTO nest_track_photos (nest_id, photo, photo_type, caption, taken_at)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, nest_id, photo_type, caption, taken_at, created_at;
-    `;
-
-    const result = await db.query(sql, [
-      nest_id,
-      photo,
-      photo_type,
-      caption || null,
-      taken_at || null
-    ]);
-
-    res.status(201).json({
-      message: "Track photo added successfully",
-      photo: result.rows[0]
-    });
-  } catch (err) {
-    console.error("Add track photo error:", err);
-    if (err.code === "23503") {
-      return res.status(404).json({ error: "Nest not found." });
-    }
-    res.status(500).json({ error: "Server error." });
-  }
-});
-
-// Get all track photos for a nest
-// Optional query param: ?photo_type=track or ?photo_type=hatchling_track
-// Returns photos as base64 strings
-app.get("/nests/:nest_id/track-photos", async (req, res) => {
-  try {
-    const { nest_id } = req.params;
-    const { photo_type } = req.query;
-
-    let sql = `
-      SELECT id, nest_id, photo, photo_type, caption, taken_at, created_at
-      FROM nest_track_photos
-      WHERE nest_id = $1
-    `;
-    const values = [nest_id];
-
-    if (photo_type) {
-      sql += ` AND photo_type = $2`;
-      values.push(photo_type);
-    }
-
-    sql += ` ORDER BY created_at ASC;`;
-
-    const result = await db.query(sql, values);
-
-    // Convert BYTEA to base64 for transport
-    const photos = result.rows.map(row => ({
-      ...row,
-      photo: row.photo ? row.photo.toString("base64") : null
-    }));
-
-    res.json({
-      message: "Track photos fetched successfully",
-      nest_id,
-      total: photos.length,
-      photos
-    });
-  } catch (err) {
-    console.error("Get track photos error:", err);
-    res.status(500).json({ error: "Server error." });
-  }
-});
-
-// Delete a single track photo by its ID
-app.delete("/track-photos/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await db.query(
-      `DELETE FROM nest_track_photos WHERE id = $1 RETURNING id, photo_type, caption;`,
-      [id]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Photo not found." });
-    }
-
-    res.json({
-      message: "Track photo deleted successfully",
-      deleted: result.rows[0]
-    });
-  } catch (err) {
-    console.error("Delete track photo error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
