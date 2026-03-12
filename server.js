@@ -47,10 +47,14 @@ app.post("/users/register", async (req, res) => {
     const userRole = role || "volunteer";
     const password_hash = await bcrypt.hash(password, 10);
 
+    const profile_picture = req.body.profile_picture
+      ? Buffer.from(req.body.profile_picture, "base64")
+      : null;
+
     const sql = `
       INSERT INTO users
-        (first_name, last_name, email, password_hash, role, station)
-      VALUES ($1, $2, $3, $4, $5, $6)
+        (first_name, last_name, email, password_hash, role, station, profile_picture)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, first_name, last_name, email, role, station, created_at;
     `;
 
@@ -60,7 +64,8 @@ app.post("/users/register", async (req, res) => {
       email,
       password_hash,
       userRole,
-      station
+      station,
+      profile_picture
     ]);
 
     res.json({
@@ -88,9 +93,16 @@ app.get("/users", async (req, res) => {
 
     const result = await db.query(sql);
 
+    const users = result.rows.map(user => ({
+      ...user,
+      profile_picture: user.profile_picture
+        ? user.profile_picture.toString("base64")
+        : null
+    }));
+
     res.json({
       message: "Users fetched successfully",
-      users: result.rows
+      users
     });
   } catch (err) {
     console.error("Get users error:", err);
@@ -124,7 +136,10 @@ app.post("/users/login", async (req, res) => {
         email: user.email,
         role: user.role,
         is_email_verified: user.is_email_verified,
-        is_active: user.is_active
+        is_active: user.is_active,
+        profile_picture: user.profile_picture
+          ? user.profile_picture.toString("base64")
+          : null
       }
     });
   } catch (err) {
@@ -146,6 +161,11 @@ app.patch("/users/:id", async (req, res) => {
     delete updates.password;
   }
 
+  // If a profile picture was sent, convert base64 to buffer
+  if (updates.profile_picture) {
+    updates.profile_picture = Buffer.from(updates.profile_picture, "base64");
+  }
+
   const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
 
   if (keys.length === 0) {
@@ -161,7 +181,8 @@ app.patch("/users/:id", async (req, res) => {
       UPDATE users 
       SET ${setClause} 
       WHERE id = $${keys.length + 1} 
-      RETURNING id, first_name, last_name, email, role, station, is_active;
+      RETURNING id, first_name, last_name, email, role, station, is_active,
+        CASE WHEN profile_picture IS NOT NULL THEN encode(profile_picture, 'base64') ELSE NULL END AS profile_picture;
     `;
 
     const values = keys.map(key => updates[key]);
