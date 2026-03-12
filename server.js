@@ -136,9 +136,16 @@ app.post("/users/login", async (req, res) => {
 // Update user endpoint
 app.patch("/users/:id", async (req, res) => {
   const userId = req.params.id;
-  const updates = req.body;
+  const updates = { ...req.body };
 
   const forbiddenFields = ["id", "created_at"];
+
+  // If a plain-text password was sent, hash it and swap it out before building keys
+  if (updates.password) {
+    updates.password_hash = await bcrypt.hash(updates.password, 10);
+    delete updates.password;
+  }
+
   const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
 
   if (keys.length === 0) {
@@ -146,14 +153,6 @@ app.patch("/users/:id", async (req, res) => {
   }
 
   try {
-    // If a plain-text password was sent, hash it and replace the key
-    if (keys.includes("password")) {
-      updates.password_hash = await bcrypt.hash(updates.password, 10);
-      delete updates.password;
-      const passwordIndex = keys.indexOf("password");
-      keys[passwordIndex] = "password_hash";
-    }
-
     const setClause = keys
       .map((key, index) => `${key} = $${index + 1}`)
       .join(", ");
