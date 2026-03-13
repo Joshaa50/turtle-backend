@@ -110,6 +110,34 @@ app.get("/users", async (req, res) => {
   }
 });
 
+// Get user by ID
+app.get("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const sql = `SELECT * FROM users WHERE id = $1 LIMIT 1;`;
+    const result = await db.query(sql, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const user = result.rows[0];
+
+    if (user.profile_picture) {
+      user.profile_picture = user.profile_picture.toString("base64");
+    }
+
+    res.json({
+      message: "User fetched successfully",
+      user
+    });
+  } catch (err) {
+    console.error("Get user by ID error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Login endpoint
 app.post("/users/login", async (req, res) => {
   try {
