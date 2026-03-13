@@ -189,9 +189,14 @@ app.patch("/users/:id", async (req, res) => {
     delete updates.password;
   }
 
-  // If a profile picture was sent, convert base64 to buffer
+  // If a profile picture was sent, strip data URL prefix if present and convert to buffer
   if (updates.profile_picture) {
-    updates.profile_picture = Buffer.from(updates.profile_picture, "base64");
+    console.log("First 100 chars:", updates.profile_picture.substring(0, 100));
+    console.log("Includes data prefix:", updates.profile_picture.includes('data:'));
+    const base64Data = updates.profile_picture.includes('data:')
+      ? updates.profile_picture.split(',')[1]
+      : updates.profile_picture;
+    updates.profile_picture = Buffer.from(base64Data, "base64");
   }
 
   const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
