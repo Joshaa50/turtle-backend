@@ -38,7 +38,7 @@ app.get("/test", (req, res) => {
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
-    const { first_name, last_name, email, password, role, station } = req.body;
+    const { first_name, last_name, email, password, role, station, is_password_reset_needed } = req.body;
 
     if (!first_name || !last_name || !email || !password || !station) {
       return res.status(400).json({ error: "Missing required fields (including station)." });
@@ -47,15 +47,11 @@ app.post("/users/register", async (req, res) => {
     const userRole = role || "volunteer";
     const password_hash = await bcrypt.hash(password, 10);
 
-    const profile_picture = req.body.profile_picture
-      ? Buffer.from(req.body.profile_picture, "base64")
-      : null;
-
     const sql = `
       INSERT INTO users
-        (first_name, last_name, email, password_hash, role, station, profile_picture)
+        (first_name, last_name, email, password_hash, role, station, is_password_reset_needed)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, first_name, last_name, email, role, station, created_at;
+      RETURNING id, first_name, last_name, email, role, station, is_password_reset_needed, created_at;
     `;
 
     const result = await db.query(sql, [
@@ -65,7 +61,7 @@ app.post("/users/register", async (req, res) => {
       password_hash,
       userRole,
       station,
-      profile_picture
+      is_password_reset_needed ?? false
     ]);
 
     res.json({
@@ -165,9 +161,7 @@ app.post("/users/login", async (req, res) => {
         role: user.role,
         is_email_verified: user.is_email_verified,
         is_active: user.is_active,
-        profile_picture: user.profile_picture
-          ? user.profile_picture.toString("base64")
-          : null
+        is_password_reset_needed: user.is_password_reset_needed
       }
     });
   } catch (err) {
