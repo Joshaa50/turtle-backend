@@ -1688,9 +1688,7 @@ app.post("/morning-surveys", async (req, res) => {
       tr_lat,
       tr_long,
       protected_nest_count,
-      notes,
-      nest_id,
-      event_id
+      notes
     } = req.body;
 
     if (!survey_date || !start_time || !end_time || !beach_id) {
@@ -1699,11 +1697,11 @@ app.post("/morning-surveys", async (req, res) => {
 
     const sql = `
       INSERT INTO morning_surveys (
-        survey_date, start_time, end_time, beach_id, 
-        tl_lat, tl_long, tr_lat, tr_long, 
-        protected_nest_count, notes, nest_id, event_id
+        survey_date, start_time, end_time, beach_id,
+        tl_lat, tl_long, tr_lat, tr_long,
+        protected_nest_count, notes
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *;
     `;
 
@@ -1717,9 +1715,7 @@ app.post("/morning-surveys", async (req, res) => {
       tr_lat ? parseFloat(tr_lat).toFixed(5) : null,
       tr_long ? parseFloat(tr_long).toFixed(5) : null,
       protected_nest_count || 0,
-      notes,
-      nest_id || null,
-      event_id || null
+      notes || null
     ];
 
     const result = await db.query(sql, values);
@@ -1731,15 +1727,204 @@ app.post("/morning-surveys", async (req, res) => {
 
   } catch (err) {
     console.error("Error creating survey:", err);
-    
     if (err.code === '23503') {
-      return res.status(400).json({ error: "Invalid Beach, Nest, or Event ID." });
+      return res.status(400).json({ error: "Invalid beach ID." });
     }
-
     res.status(500).json({ error: "Server error while saving survey." });
   }
 });
 
+// Link a nest to a survey
+app.post("/morning-surveys/:id/nests", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nest_id } = req.body;
+
+    if (!nest_id) {
+      return res.status(400).json({ error: "nest_id is required." });
+    }
+
+    // Confirm survey exists
+    const surveyResult = await db.query(
+      `SELECT id FROM morning_surveys WHERE id = $1 LIMIT 1;`,
+      [id]
+    );
+    if (surveyResult.rows.length === 0) {
+      return res.status(404).json({ error: "Survey not found." });
+    }
+
+    // Confirm nest exists
+    const nestResult = await db.query(
+      `SELECT id FROM turtle_nests WHERE id = $1 LIMIT 1;`,
+      [nest_id]
+    );
+    if (nestResult.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const result = await db.query(
+      `INSERT INTO morning_survey_nests (survey_id, nest_id)
+       VALUES ($1, $2)
+       RETURNING *;`,
+      [id, nest_id]
+    );
+
+    res.status(201).json({
+      message: "Nest linked to survey successfully",
+      link: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Link nest to survey error:", err);
+    if (err.code === "23505") {
+      return res.status(400).json({ error: "Nest is already linked to this survey." });
+    }
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+//Link an emergence to a survey
+app.post("/morning-surveys/:id/emergences", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { emergence_id } = req.body;
+
+    if (!emergence_id) {
+      return res.status(400).json({ error: "emergence_id is required." });
+    }
+
+    // Confirm survey exists
+    const surveyResult = await db.query(
+      `SELECT id FROM morning_surveys WHERE id = $1 LIMIT 1;`,
+      [id]
+    );
+    if (surveyResult.rows.length === 0) {
+      return res.status(404).json({ error: "Survey not found." });
+    }
+
+    // Confirm emergence exists
+    const emergenceResult = await db.query(
+      `SELECT id FROM turtle_emergences WHERE id = $1 LIMIT 1;`,
+      [emergence_id]
+    );
+    if (emergenceResult.rows.length === 0) {
+      return res.status(404).json({ error: "Emergence not found." });
+    }
+
+    const result = await db.query(
+      `INSERT INTO morning_survey_emergences (survey_id, emergence_id)
+       VALUES ($1, $2)
+       RETURNING *;`,
+      [id, emergence_id]
+    );
+
+    res.status(201).json({
+      message: "Emergence linked to survey successfully",
+      link: result.rows[0]
+    });
+  } catch (err) {
+    console.error("Link emergence to survey error:", err);
+    if (err.code === "23505") {
+      return res.status(400).json({ error: "Emergence is already linked to this survey." });
+    }
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Get a single survey with all its linked nests and emergences
+app.get("/morning-surveys/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch the survey
+    const surveyResult = await db.query(
+      `SELECT ms.*, b.name AS beach_name
+       FROM morning_surveys ms
+       LEFT JOIN beaches b ON ms.beach_id = b.id
+       WHERE ms.id = $1 LIMIT 1;`,
+      [id]
+    );
+
+    if (surveyResult.rows.length === 0) {
+      return res.status(404).json({ error: "Survey not found." });
+    }
+
+    // Fetch linked nests
+    const nestsResult = await db.query(
+      `SELECT tn.*
+       FROM morning_survey_nests msn
+       JOIN turtle_nests tn ON msn.nest_id = tn.id
+       WHERE msn.survey_id = $1;`,
+      [id]
+    );
+
+    // Fetch linked emergences
+    const emergencesResult = await db.query(
+      `SELECT te.*
+       FROM morning_survey_emergences mse
+       JOIN turtle_emergences te ON mse.emergence_id = te.id
+       WHERE mse.survey_id = $1;`,
+      [id]
+    );
+
+    res.json({
+      message: "Survey fetched successfully",
+      survey: {
+        ...surveyResult.rows[0],
+        nests: nestsResult.rows,
+        emergences: emergencesResult.rows
+      }
+    });
+  } catch (err) {
+    console.error("Get survey error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Unlink a nest from a survey
+app.delete("/morning-surveys/:id/nests/:nest_id", async (req, res) => {
+  try {
+    const { id, nest_id } = req.params;
+
+    const result = await db.query(
+      `DELETE FROM morning_survey_nests
+       WHERE survey_id = $1 AND nest_id = $2
+       RETURNING *;`,
+      [id, nest_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Link not found." });
+    }
+
+    res.json({ message: "Nest unlinked from survey successfully." });
+  } catch (err) {
+    console.error("Unlink nest from survey error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Unlink an emergence from a survey
+app.delete("/morning-surveys/:id/emergences/:emergence_id", async (req, res) => {
+  try {
+    const { id, emergence_id } = req.params;
+
+    const result = await db.query(
+      `DELETE FROM morning_survey_emergences
+       WHERE survey_id = $1 AND emergence_id = $2
+       RETURNING *;`,
+      [id, emergence_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Link not found." });
+    }
+
+    res.json({ message: "Emergence unlinked from survey successfully." });
+  } catch (err) {
+    console.error("Unlink emergence from survey error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
 
 // Start server
 const PORT = process.env.PORT || 5001;
