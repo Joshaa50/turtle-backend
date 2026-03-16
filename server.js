@@ -741,44 +741,36 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 
 // Create Nest endpoint
 app.post("/nests/create", async (req, res) => {
+  const client = await db.connect();
   try {
     const {
+      gps_lat,
+      gps_long,
+      distance_to_sea_s,
+      beach,
+      date_found,
+      track_sketch,
       nest_code,
       total_num_eggs,
       current_num_eggs,
-
       depth_top_egg_h,
       depth_bottom_chamber_h,
-      distance_to_sea_s,
       width_w,
-      gps_long,
-      gps_lat,
-
       tri_tl_desc,
       tri_tl_lat,
       tri_tl_long,
       tri_tl_distance,
-
       tri_tr_desc,
       tri_tr_lat,
       tri_tr_long,
       tri_tr_distance,
-
+      tri_tl_img,
+      tri_tr_img,
       status,
       relocated,
       is_archived,
-      date_found,
-      beach,
       notes
     } = req.body;
-
-    // Convert base64 image strings to Buffers for BYTEA storage
-    const tri_tl_img = req.body.tri_tl_img
-      ? Buffer.from(req.body.tri_tl_img, "base64")
-      : null;
-    const tri_tr_img = req.body.tri_tr_img
-      ? Buffer.from(req.body.tri_tr_img, "base64")
-      : null;
 
     // Required fields validation
     if (
@@ -790,110 +782,107 @@ app.post("/nests/create", async (req, res) => {
       !date_found ||
       !beach
     ) {
-      return res.status(400).json({
-        error: "Missing required fields."
-      });
+      return res.status(400).json({ error: "Missing required fields." });
     }
 
-    // Validate status if provided
+    // Validate status
     const validStatuses = ["incubating", "hatching", "hatched"];
     const nestStatus = status ? status.toLowerCase() : "incubating";
-
     if (!validStatuses.includes(nestStatus)) {
       return res.status(400).json({
         error: "status must be 'incubating', 'hatching', or 'hatched'"
       });
     }
 
-    // Default current_num_eggs to total_num_eggs if not provided
-    const currentEggs =
-      current_num_eggs != null ? current_num_eggs : total_num_eggs;
+    const currentEggs = current_num_eggs != null ? current_num_eggs : total_num_eggs;
+    const tl_img = tri_tl_img ? Buffer.from(tri_tl_img, "base64") : null;
+    const tr_img = tri_tr_img ? Buffer.from(tri_tr_img, "base64") : null;
+    const sketch = track_sketch ? Buffer.from(track_sketch, "base64") : null;
 
-    const sql = `
-      INSERT INTO turtle_nests (
-        nest_code,
-        total_num_eggs,
-        current_num_eggs,
-        depth_top_egg_h,
-        depth_bottom_chamber_h,
-        distance_to_sea_s,
-        width_w,
-        gps_long,
-        gps_lat,
+    await client.query("BEGIN");
 
-        tri_tl_desc,
-        tri_tl_lat,
-        tri_tl_long,
-        tri_tl_distance,
-        tri_tl_img,
+    // Step 1: Create the emergence
+    const emergenceResult = await client.query(
+      `INSERT INTO turtle_emergences (gps_lat, gps_long, distance_to_sea_s, beach, event_date, track_sketch)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *;`,
+      [gps_lat, gps_long, distance_to_sea_s, beach, date_found, sketch]
+    );
 
-        tri_tr_desc,
-        tri_tr_lat,
-        tri_tr_long,
-        tri_tr_distance,
-        tri_tr_img,
+    console.log("Emergence result rows:", emergenceResult.rows);
+    console.log("Emergence ID:", emergenceResult.rows[0]?.id);
 
-        status,
-        relocated,
-        is_archived,
-        date_found,
-        beach,
-        notes
+    const emergence_id = emergenceResult.rows[0]?.id;
+
+    if (!emergence_id) {
+      await client.query("ROLLBACK");
+      return res.status(500).json({ error: "Emergence insert returned no ID." });
+    }
+
+    // Step 2: Create the nest linked to the emergence
+    const nestResult = await client.query(
+      `INSERT INTO turtle_nests (
+        nest_code, total_num_eggs, current_num_eggs,
+        depth_top_egg_h, depth_bottom_chamber_h, distance_to_sea_s,
+        width_w, gps_long, gps_lat,
+        tri_tl_desc, tri_tl_lat, tri_tl_long, tri_tl_distance, tri_tl_img,
+        tri_tr_desc, tri_tr_lat, tri_tr_long, tri_tr_distance, tri_tr_img,
+        status, relocated, is_archived, date_found, beach, notes, emergence_id
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,
         $10,$11,$12,$13,$14,
         $15,$16,$17,$18,$19,
-        $20,$21,$22,$23,$24,$25
+        $20,$21,$22,$23,$24,$25,$26
       )
-      RETURNING *;
-    `;
+      RETURNING *;`,
+      [
+        nest_code,
+        total_num_eggs || null,
+        currentEggs || null,
+        depth_top_egg_h,
+        depth_bottom_chamber_h || null,
+        distance_to_sea_s,
+        width_w || null,
+        gps_long,
+        gps_lat,
+        tri_tl_desc || null,
+        tri_tl_lat || null,
+        tri_tl_long || null,
+        tri_tl_distance || null,
+        tl_img,
+        tri_tr_desc || null,
+        tri_tr_lat || null,
+        tri_tr_long || null,
+        tri_tr_distance || null,
+        tr_img,
+        nestStatus,
+        relocated ?? false,
+        is_archived ?? false,
+        date_found,
+        beach,
+        notes || null,
+        emergence_id
+      ]
+    );
 
-    const result = await db.query(sql, [
-      nest_code,
-      total_num_eggs || null,
-      currentEggs || null,
-      depth_top_egg_h,
-      depth_bottom_chamber_h || null,
-      distance_to_sea_s,
-      width_w || null,
-      gps_long,
-      gps_lat,
-
-      tri_tl_desc || null,
-      tri_tl_lat || null,
-      tri_tl_long || null,
-      tri_tl_distance || null,
-      tri_tl_img,
-
-      tri_tr_desc || null,
-      tri_tr_lat || null,
-      tri_tr_long || null,
-      tri_tr_distance || null,
-      tri_tr_img,
-
-      nestStatus,
-      relocated ?? false,
-      is_archived ?? false,
-      date_found,
-      beach,
-      notes || null
-    ]);
+    await client.query("COMMIT");
 
     res.json({
-      message: "Nest created successfully",
-      nest: result.rows[0]
+      message: "Nest and emergence created successfully",
+      nest: nestResult.rows[0],
+      emergence_id
     });
+
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("Create nest error:", err);
-
     if (err.code === "23505") {
-      return res.status(400).json({
-        error: "Nest code already exists."
-      });
+      return res.status(400).json({ error: "Nest code already exists." });
     }
-
     res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
   }
 });
 
@@ -1129,149 +1118,147 @@ app.get("/nests/:nest_code", async (req, res) => {
 // Turtle nest events
 //---------------------------------------------------------------
 // Create Turtle Nest Event endpoint
-app.post("/nests/create", async (req, res) => {
-  const client = await db.connect();
+app.post("/nest-events/create", async (req, res) => {
   try {
     const {
-      gps_lat,
-      gps_long,
-      distance_to_sea_s,
-      beach,
-      date_found,
-      track_sketch,
+      event_type,
       nest_code,
-      total_num_eggs,
-      current_num_eggs,
-      depth_top_egg_h,
-      depth_bottom_chamber_h,
-      width_w,
-      tri_tl_desc,
-      tri_tl_lat,
-      tri_tl_long,
-      tri_tl_distance,
-      tri_tr_desc,
-      tri_tr_lat,
-      tri_tr_long,
-      tri_tr_distance,
-      tri_tl_img,
-      tri_tr_img,
-      status,
-      relocated,
-      is_archived,
-      notes
+      
+      tracks_to_sea,
+      tracks_lost,
+
+      original_depth_top_egg_h,
+      original_depth_bottom_chamber_h,
+      original_width_w,
+      original_distance_to_sea_s,
+      original_gps_lat,
+      original_gps_long,
+
+      total_eggs,
+      helped_to_sea,
+      eggs_reburied,
+
+      hatched_count,
+      hatched_black_fungus_count,
+      hatched_green_bacteria_count,
+      hatched_pink_bacteria_count,
+
+      non_viable_count,
+      non_viable_black_fungus_count,
+      non_viable_green_bacteria_count,
+      non_viable_pink_bacteria_count,
+
+      eye_spot_count,
+      eye_spot_black_fungus_count,
+      eye_spot_green_bacteria_count,
+      eye_spot_pink_bacteria_count,
+
+      early_count,
+      early_black_fungus_count,
+      early_green_bacteria_count,
+      early_pink_bacteria_count,
+
+      middle_count,
+      middle_black_fungus_count,
+      middle_green_bacteria_count,
+      middle_pink_bacteria_count,
+
+      late_count,
+      late_black_fungus_count,
+      late_green_bacteria_count,
+      late_pink_bacteria_count,
+
+      piped_dead_count,
+      piped_dead_black_fungus_count,
+      piped_dead_green_bacteria_count,
+      piped_dead_pink_bacteria_count,
+
+      piped_alive_count,
+      alive_within,
+      dead_within,
+      alive_above,
+      dead_above,
+
+      reburied_depth_top_egg_h,
+      reburied_depth_bottom_chamber_h,
+      reburied_width_w,
+      reburied_distance_to_sea_s,
+      reburied_gps_lat,
+      reburied_gps_long,
+
+      notes,
+      start_time,
+      end_time,
+      observer
     } = req.body;
 
-    // Required fields validation
-    if (
-      !nest_code ||
-      depth_top_egg_h == null ||
-      distance_to_sea_s == null ||
-      gps_long == null ||
-      gps_lat == null ||
-      !date_found ||
-      !beach
-    ) {
-      return res.status(400).json({ error: "Missing required fields." });
+    if (!event_type || !nest_code) {
+      return res.status(400).json({ error: "event_type and nest_code are required." });
     }
 
-    // Validate status
-    const validStatuses = ["incubating", "hatching", "hatched"];
-    const nestStatus = status ? status.toLowerCase() : "incubating";
-    if (!validStatuses.includes(nestStatus)) {
-      return res.status(400).json({
-        error: "status must be 'incubating', 'hatching', or 'hatched'"
-      });
-    }
-
-    const currentEggs = current_num_eggs != null ? current_num_eggs : total_num_eggs;
-    const tl_img = tri_tl_img ? Buffer.from(tri_tl_img, "base64") : null;
-    const tr_img = tri_tr_img ? Buffer.from(tri_tr_img, "base64") : null;
-    const sketch = track_sketch ? Buffer.from(track_sketch, "base64") : null;
-
-    await client.query("BEGIN");
-
-    // Step 1: Create the emergence
-    const emergenceResult = await client.query(
-      `INSERT INTO turtle_emergences (gps_lat, gps_long, distance_to_sea_s, beach, event_date, track_sketch)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *;`,
-      [gps_lat, gps_long, distance_to_sea_s, beach, date_found, sketch]
+    const nestResult = await db.query(
+      `SELECT id FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
+      [nest_code]
     );
 
-    console.log("Emergence result rows:", emergenceResult.rows);
-    console.log("Emergence ID:", emergenceResult.rows[0]?.id);
-
-    const emergence_id = emergenceResult.rows[0]?.id;
-
-    if (!emergence_id) {
-      await client.query("ROLLBACK");
-      return res.status(500).json({ error: "Emergence insert returned no ID." });
+    if (nestResult.rows.length === 0) {
+      return res.status(404).json({ error: "Nest not found." });
     }
 
-    // Step 2: Create the nest linked to the emergence
-    const nestResult = await client.query(
-      `INSERT INTO turtle_nests (
-        nest_code, total_num_eggs, current_num_eggs,
-        depth_top_egg_h, depth_bottom_chamber_h, distance_to_sea_s,
-        width_w, gps_long, gps_lat,
-        tri_tl_desc, tri_tl_lat, tri_tl_long, tri_tl_distance, tri_tl_img,
-        tri_tr_desc, tri_tr_lat, tri_tr_long, tri_tr_distance, tri_tr_img,
-        status, relocated, is_archived, date_found, beach, notes, emergence_id
+    const nest_id = nestResult.rows[0].id;
+
+    const sql = `
+      INSERT INTO turtle_nest_events (
+        event_type, nest_id, nest_code,
+        tracks_to_sea, tracks_lost,
+        original_depth_top_egg_h, original_depth_bottom_chamber_h, original_width_w,
+        original_distance_to_sea_s, original_gps_lat, original_gps_long,
+        total_eggs, helped_to_sea, eggs_reburied,
+        hatched_count, hatched_black_fungus_count, hatched_green_bacteria_count, hatched_pink_bacteria_count,
+        non_viable_count, non_viable_black_fungus_count, non_viable_green_bacteria_count, non_viable_pink_bacteria_count,
+        eye_spot_count, eye_spot_black_fungus_count, eye_spot_green_bacteria_count, eye_spot_pink_bacteria_count,
+        early_count, early_black_fungus_count, early_green_bacteria_count, early_pink_bacteria_count,
+        middle_count, middle_black_fungus_count, middle_green_bacteria_count, middle_pink_bacteria_count,
+        late_count, late_black_fungus_count, late_green_bacteria_count, late_pink_bacteria_count,
+        piped_dead_count, piped_dead_black_fungus_count, piped_dead_green_bacteria_count, piped_dead_pink_bacteria_count,
+        piped_alive_count, alive_within, dead_within, alive_above, dead_above,
+        reburied_depth_top_egg_h, reburied_depth_bottom_chamber_h, reburied_width_w,
+        reburied_distance_to_sea_s, reburied_gps_lat, reburied_gps_long,
+        notes, start_time, end_time, observer
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,
-        $10,$11,$12,$13,$14,
-        $15,$16,$17,$18,$19,
-        $20,$21,$22,$23,$24,$25,$26
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57
       )
-      RETURNING *;`,
-      [
-        nest_code,
-        total_num_eggs || null,
-        currentEggs || null,
-        depth_top_egg_h,
-        depth_bottom_chamber_h || null,
-        distance_to_sea_s,
-        width_w || null,
-        gps_long,
-        gps_lat,
-        tri_tl_desc || null,
-        tri_tl_lat || null,
-        tri_tl_long || null,
-        tri_tl_distance || null,
-        tl_img,
-        tri_tr_desc || null,
-        tri_tr_lat || null,
-        tri_tr_long || null,
-        tri_tr_distance || null,
-        tr_img,
-        nestStatus,
-        relocated ?? false,
-        is_archived ?? false,
-        date_found,
-        beach,
-        notes || null,
-        emergence_id
-      ]
-    );
+      RETURNING *;
+    `;
 
-    await client.query("COMMIT");
+    const values = [
+      event_type, nest_id, nest_code,
+      tracks_to_sea || 0, tracks_lost || 0,
+      original_depth_top_egg_h || null, original_depth_bottom_chamber_h || null, original_width_w || null,
+      original_distance_to_sea_s || null, original_gps_lat || null, original_gps_long || null,
+      total_eggs || null, helped_to_sea || null, eggs_reburied || null,
+      hatched_count || null, hatched_black_fungus_count || null, hatched_green_bacteria_count || null, hatched_pink_bacteria_count || null,
+      non_viable_count || null, non_viable_black_fungus_count || null, non_viable_green_bacteria_count || null, non_viable_pink_bacteria_count || null,
+      eye_spot_count || null, eye_spot_black_fungus_count || null, eye_spot_green_bacteria_count || null, eye_spot_pink_bacteria_count || null,
+      early_count || null, early_black_fungus_count || null, early_green_bacteria_count || null, early_pink_bacteria_count || null,
+      middle_count || null, middle_black_fungus_count || null, middle_green_bacteria_count || null, middle_pink_bacteria_count || null,
+      late_count || null, late_black_fungus_count || null, late_green_bacteria_count || null, late_pink_bacteria_count || null,
+      piped_dead_count || null, piped_dead_black_fungus_count || null, piped_dead_green_bacteria_count || null, piped_dead_pink_bacteria_count || null,
+      piped_alive_count || null, alive_within || null, dead_within || null, alive_above || null, dead_above || null,
+      reburied_depth_top_egg_h || null, reburied_depth_bottom_chamber_h || null, reburied_width_w || null,
+      reburied_distance_to_sea_s || null, reburied_gps_lat || null, reburied_gps_long || null,
+      notes || null, start_time || null, end_time || null, observer || null
+    ];
 
-    res.json({
-      message: "Nest and emergence created successfully",
-      nest: nestResult.rows[0],
-      emergence_id
-    });
+    const result = await db.query(sql, values);
+    res.json({ message: "Turtle nest event created successfully", event: result.rows[0] });
 
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Create nest error:", err);
-    if (err.code === "23505") {
-      return res.status(400).json({ error: "Nest code already exists." });
-    }
+    console.error("Create turtle nest event error:", err);
     res.status(500).json({ error: "Server error." });
-  } finally {
-    client.release();
   }
 });
 
