@@ -1133,17 +1133,12 @@ app.post("/nests/create", async (req, res) => {
   const client = await db.connect();
   try {
     const {
-      // Shared fields (used for both emergence and nest)
       gps_lat,
       gps_long,
       distance_to_sea_s,
       beach,
       date_found,
-
-      // Emergence only
       track_sketch,
-
-      // Nest only
       nest_code,
       total_num_eggs,
       current_num_eggs,
@@ -1189,7 +1184,6 @@ app.post("/nests/create", async (req, res) => {
     }
 
     const currentEggs = current_num_eggs != null ? current_num_eggs : total_num_eggs;
-
     const tl_img = tri_tl_img ? Buffer.from(tri_tl_img, "base64") : null;
     const tr_img = tri_tr_img ? Buffer.from(tri_tr_img, "base64") : null;
     const sketch = track_sketch ? Buffer.from(track_sketch, "base64") : null;
@@ -1200,11 +1194,19 @@ app.post("/nests/create", async (req, res) => {
     const emergenceResult = await client.query(
       `INSERT INTO turtle_emergences (gps_lat, gps_long, distance_to_sea_s, beach, event_date, track_sketch)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id;`,
+       RETURNING *;`,
       [gps_lat, gps_long, distance_to_sea_s, beach, date_found, sketch]
     );
 
-    const emergence_id = emergenceResult.rows[0].id;
+    console.log("Emergence result rows:", emergenceResult.rows);
+    console.log("Emergence ID:", emergenceResult.rows[0]?.id);
+
+    const emergence_id = emergenceResult.rows[0]?.id;
+
+    if (!emergence_id) {
+      await client.query("ROLLBACK");
+      return res.status(500).json({ error: "Emergence insert returned no ID." });
+    }
 
     // Step 2: Create the nest linked to the emergence
     const nestResult = await client.query(
