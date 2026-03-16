@@ -1462,14 +1462,18 @@ app.post("/emergences", async (req, res) => {
       beach
     } = req.body;
 
+    const track_sketch = req.body.track_sketch
+      ? Buffer.from(req.body.track_sketch, "base64")
+      : null;
+
     if (!event_date) {
       return res.status(400).json({ error: "event_date is required." });
     }
 
     const sql = `
-      INSERT INTO turtle_emergences (distance_to_sea_s, gps_lat, gps_long, event_date, beach)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *;
+      INSERT INTO turtle_emergences (distance_to_sea_s, gps_lat, gps_long, event_date, beach, track_sketch)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, distance_to_sea_s, gps_lat, gps_long, event_date, beach, created_at, updated_at;
     `;
 
     const result = await db.query(sql, [
@@ -1477,7 +1481,8 @@ app.post("/emergences", async (req, res) => {
       gps_lat || null,
       gps_long || null,
       event_date,
-      beach || null
+      beach || null,
+      track_sketch
     ]);
 
     res.status(201).json({
