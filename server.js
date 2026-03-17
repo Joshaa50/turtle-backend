@@ -1505,6 +1505,35 @@ app.get("/emergences", async (req, res) => {
   }
 });
 
+// Get turtle emergence by id
+app.get("/emergences/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const sql = `SELECT * FROM turtle_emergences WHERE id = $1 LIMIT 1;`;
+    const result = await db.query(sql, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Emergence not found." });
+    }
+
+    const emergence = result.rows[0];
+
+    // Convert track sketch buffer to base64 for JSON transport
+    if (emergence.track_sketch) {
+      emergence.track_sketch = emergence.track_sketch.toString("base64");
+    }
+
+    res.json({
+      message: "Emergence fetched successfully",
+      emergence
+    });
+  } catch (err) {
+    console.error("Get emergence by ID error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Shifts table
 //---------------------------------------------------------------
 
