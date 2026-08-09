@@ -1949,6 +1949,174 @@ app.delete("/morning-surveys/:id/emergences/:emergence_id", async (req, res) => 
   }
 });
 
+// AI proxy endpoints (Gemini)
+//--------------------------------------------------------------
+// The GEMINI_API_KEY stays server-side and is never exposed to the browser.
+// The frontend calls these endpoints instead of talking to Google directly.
+const { GoogleGenAI, Type } = require("@google/genai");
+
+const getAiClient = () => {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured on the server.");
+  }
+  return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+};
+
+// Natural-language questions about nest records -> { text?, chart? }
+app.post("/ai/nest-query", async (req, res) => {
+  try {
+    const { query, nests } = req.body;
+    if (!query || typeof query !== "string") {
+      return res.status(400).json({ error: "Missing 'query'." });
+    }
+
+    const ai = getAiClient();
+
+    const systemInstruction = `
+You are an AI assistant for a sea turtle conservation portal.
+The user will ask a question about the nest records.
+You are provided with the current nest data in JSON format.
+If the user asks for a graph or chart, you MUST return a JSON object that describes the chart.
+If the user asks a general question, you can return a JSON object with just a "text" field.
+
+The JSON schema you must follow is:
+{
+  "text": "A textual response to the user's query (optional if chart is provided, but good for explanation)",
+  "chart": {
+    "type": "bar" | "line" | "pie",
+    "data": [ { "name": "Category A", "value": 10 }, ... ],
+    "xAxisKey": "name",
+    "yAxisKey": "value",
+    "title": "Chart Title"
+  }
+}
+
+Only include the "chart" field if a chart is requested or makes sense for the data.
+Here is the nest data:
+${JSON.stringify((nests || []).map((n) => ({
+  id: n.id,
+  status: n.status,
+  species: n.species,
+  eggs: n.eggs,
+  location: n.location,
+  date: n.date,
+})))}
+`;
+
+    const result = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: query,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            text: { type: Type.STRING },
+            chart: {
+              type: Type.OBJECT,
+              properties: {
+                type: { type: Type.STRING, description: "bar, line, or pie" },
+                data: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING },
+                      value: { type: Type.NUMBER },
+                    },
+                  },
+                },
+                xAxisKey: { type: Type.STRING },
+                yAxisKey: { type: Type.STRING },
+                title: { type: Type.STRING },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    let jsonStr = result.text;
+    if (!jsonStr) {
+      return res.json({});
+    }
+    jsonStr = jsonStr.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    return res.json(JSON.parse(jsonStr));
+  } catch (err) {
+    console.error("AI nest-query error:", err);
+    return res.status(500).json({ error: "Failed to process query." });
+  }
+});
+
+// Voice logging of nest inventory stages -> { results: [...] }
+app.post("/ai/analyze-audio", async (req, res) => {
+  try {
+    const { audioBase64, mimeType } = req.body;
+    if (!audioBase64) {
+      return res.status(400).json({ error: "Missing 'audioBase64'." });
+    }
+
+    const ai = getAiClient();
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || "audio/webm",
+                data: audioBase64,
+              },
+            },
+            {
+              text: `You are an assistant for a turtle nest inventory. Listen to the audio and identify all embryonic stage categories and infection sub-categories mentioned.
+                Categories: hatched, noVisible, eyeSpot, early, middle, late, pippedDead, pippedAlive.
+                Infection Sub-Categories: black (black fungus), pink (pink bacteria), green (green bacteria).
+                The user may say multiple items in a list, like 'hatched, hatched black, hatched'.
+                The user may also mention multiple infections for a single item, like 'hatched black and green'.
+                Return a JSON object with a 'results' array. Each item in the array should have 'category', 'subCategories' (an array of strings), and 'count'.
+                Example: 'hatched black and green' -> results: [{"category": "hatched", "subCategories": ["black", "green"], "count": 1}]
+                Example: 'hatched, hatched black, hatched' -> results: [{"category": "hatched", "subCategories": [], "count": 1}, {"category": "hatched", "subCategories": ["black"], "count": 1}, {"category": "hatched", "subCategories": [], "count": 1}]
+                Return ONLY the JSON object.`,
+            },
+          ],
+        },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            results: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: { type: Type.STRING, nullable: true },
+                  subCategories: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  count: { type: Type.NUMBER },
+                },
+                required: ["category", "subCategories", "count"],
+              },
+            },
+          },
+          required: ["results"],
+        },
+      },
+    });
+
+    return res.json(JSON.parse(response.text || "{}"));
+  } catch (err) {
+    console.error("AI analyze-audio error:", err);
+    return res.status(500).json({ error: "Failed to analyze audio." });
+  }
+});
+
 // Start server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
