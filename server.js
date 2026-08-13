@@ -578,6 +578,49 @@ app.get("/turtles/:id", async (req, res) => {
   }
 });
 
+// Delete a turtle and its survey events.
+//
+// Survey events have no meaning without the turtle they describe, so they go
+// with it. Both statements run in one transaction: a half-deleted turtle would
+// leave events pointing at a missing row, which the records screen reads.
+app.delete("/turtles/:id", async (req, res) => {
+  const { id } = req.params;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const events = await client.query(
+      `DELETE FROM turtle_survey_events WHERE turtle_id = $1 RETURNING id;`,
+      [id]
+    );
+
+    const turtle = await client.query(
+      `DELETE FROM turtles WHERE id = $1 RETURNING *;`,
+      [id]
+    );
+
+    if (turtle.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Turtle not found." });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Turtle deleted successfully",
+      deleted_turtle: turtle.rows[0],
+      deleted_event_count: events.rowCount
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Delete turtle error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
+  }
+});
+
 // Turtle Survey events table
 //--------------------------------------------------------------
 // Create Turtle Survey Event endpoint
@@ -1539,6 +1582,63 @@ app.get("/emergences/:id", async (req, res) => {
   } catch (err) {
     console.error("Get emergence by ID error:", err);
     res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Delete an emergence record.
+//
+// An emergence can be the companion row of a nest (nests.emergence_id), which is
+// where the nest's track sketch and first-emergence detail live. Deleting one of
+// those would strip data off a nest that is still in the season's records, so
+// this refuses and names the nest instead of cascading. Links from morning
+// surveys are just join rows and are removed with it.
+app.delete("/emergences/:id", async (req, res) => {
+  const { id } = req.params;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const attachedNests = await client.query(
+      `SELECT nest_code FROM nests WHERE emergence_id = $1;`,
+      [id]
+    );
+
+    if (attachedNests.rowCount > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Emergence is attached to a nest record and cannot be deleted.",
+        nest_codes: attachedNests.rows.map((r) => r.nest_code)
+      });
+    }
+
+    await client.query(
+      `DELETE FROM morning_survey_emergences WHERE emergence_id = $1;`,
+      [id]
+    );
+
+    const emergence = await client.query(
+      `DELETE FROM turtle_emergences WHERE id = $1 RETURNING id, beach, event_date;`,
+      [id]
+    );
+
+    if (emergence.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Emergence not found." });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Emergence deleted successfully",
+      deleted_emergence: emergence.rows[0]
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Delete emergence error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
   }
 });
 
