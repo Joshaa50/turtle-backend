@@ -1636,7 +1636,7 @@ app.delete("/emergences/:id", async (req, res) => {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Delete emergence error:", err);
-    res.status(500).json({ error: "Server error." });
+    res.status(500).json({ error: "Server error.", detail: err.message, code: err.code });
   } finally {
     client.release();
   }
