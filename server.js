@@ -1600,7 +1600,7 @@ app.delete("/emergences/:id", async (req, res) => {
     await client.query("BEGIN");
 
     const attachedNests = await client.query(
-      `SELECT nest_code FROM nests WHERE emergence_id = $1;`,
+      `SELECT nest_code FROM turtle_nests WHERE emergence_id = $1;`,
       [id]
     );
 
@@ -1636,7 +1636,7 @@ app.delete("/emergences/:id", async (req, res) => {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Delete emergence error:", err);
-    res.status(500).json({ error: "Server error.", detail: err.message, code: err.code });
+    res.status(500).json({ error: "Server error." });
   } finally {
     client.release();
   }
