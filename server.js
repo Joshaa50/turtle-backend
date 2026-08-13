@@ -1082,10 +1082,15 @@ app.get("/nests/:nest_code", async (req, res) => {
   try {
     const { nest_code } = req.params;
 
+    // The track sketch captured at nest creation is stored on the companion
+    // emergence row (see POST /nests/create) - turtle_nests has no sketch
+    // column - so join it back in, otherwise the nest details page can never
+    // display a sketch for any nest.
     const sql = `
-      SELECT *
-      FROM turtle_nests
-      WHERE nest_code = $1
+      SELECT n.*, e.track_sketch
+      FROM turtle_nests n
+      LEFT JOIN turtle_emergences e ON e.id = n.emergence_id
+      WHERE n.nest_code = $1
       LIMIT 1;
     `;
 
@@ -1103,6 +1108,9 @@ app.get("/nests/:nest_code", async (req, res) => {
     }
     if (nest.tri_tr_img) {
       nest.tri_tr_img = nest.tri_tr_img.toString("base64");
+    }
+    if (nest.track_sketch) {
+      nest.track_sketch = nest.track_sketch.toString("base64");
     }
 
     res.json({
