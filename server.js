@@ -1600,6 +1600,99 @@ app.get("/emergences/:id", async (req, res) => {
   }
 });
 
+// Update an emergence record.
+//
+// Only the fields a correction would touch. Everything COALESCEs, so a partial
+// body leaves the rest of the row alone.
+app.put("/emergences/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
+
+    const result = await db.query(
+      `UPDATE turtle_emergences
+       SET distance_to_sea_s = COALESCE($1, distance_to_sea_s),
+           gps_lat           = COALESCE($2, gps_lat),
+           gps_long          = COALESCE($3, gps_long),
+           event_date        = COALESCE($4, event_date),
+           beach             = COALESCE($5, beach),
+           updated_at        = NOW()
+       WHERE id = $6
+       RETURNING id, distance_to_sea_s, gps_lat, gps_long, event_date, beach;`,
+      [
+        distance_to_sea_s ?? null,
+        gps_lat ?? null,
+        gps_long ?? null,
+        event_date ?? null,
+        beach ?? null,
+        id
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Emergence not found." });
+    }
+
+    res.json({ message: "Emergence updated successfully", emergence: result.rows[0] });
+  } catch (err) {
+    console.error("Update emergence error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Delete a nest and everything hanging off it.
+//
+// Nest events and morning-survey links are meaningless without the nest, so they
+// go with it in one transaction. The companion emergence row is deliberately
+// left behind: it is a sighting record in its own right and appears in the
+// Emergences list, so it becomes a standalone row rather than vanishing. Once
+// the nest is gone it is no longer referenced, so it can be deleted separately
+// if wanted.
+app.delete("/nests/:id", async (req, res) => {
+  const { id } = req.params;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const nest = await client.query(
+      `SELECT id, nest_code FROM turtle_nests WHERE id = $1;`,
+      [id]
+    );
+
+    if (nest.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const events = await client.query(
+      `DELETE FROM turtle_nest_events WHERE nest_code = $1 RETURNING id;`,
+      [nest.rows[0].nest_code]
+    );
+
+    await client.query(`DELETE FROM morning_survey_nests WHERE nest_id = $1;`, [id]);
+
+    const deleted = await client.query(
+      `DELETE FROM turtle_nests WHERE id = $1 RETURNING id, nest_code, beach;`,
+      [id]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Nest deleted successfully",
+      deleted_nest: deleted.rows[0],
+      deleted_event_count: events.rowCount
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Delete nest error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
+  }
+});
+
 // Delete an emergence record.
 //
 // An emergence can be the companion row of a nest (nests.emergence_id), which is
