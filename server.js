@@ -458,7 +458,14 @@ app.put("/turtles/:id/update", async (req, res) => {
 
       tail_extension,
       vent_to_tail_tip,
-      total_tail_length
+      total_tail_length,
+
+      // Identity fields are optional: the tagging screen re-records measurements
+      // for a turtle it has already identified and never sends these, so they
+      // COALESCE to the stored value when omitted.
+      name,
+      species,
+      sex
     } = req.body;
 
     if (
@@ -507,6 +514,10 @@ app.put("/turtles/:id/update", async (req, res) => {
         vent_to_tail_tip = $17,
         total_tail_length = $18,
 
+        name = COALESCE($20, name),
+        species = COALESCE($21, species),
+        sex = COALESCE($22, sex),
+
         updated_at = NOW()
       WHERE id = $19
       RETURNING *;
@@ -539,7 +550,11 @@ app.put("/turtles/:id/update", async (req, res) => {
       vent_to_tail_tip,
       total_tail_length,
 
-      id
+      id,
+
+      name ?? null,
+      species ?? null,
+      sex ?? null
     ]);
 
     if (result.rows.length === 0) {
