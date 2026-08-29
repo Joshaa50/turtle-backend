@@ -42,6 +42,8 @@ const PUBLIC_ROUTES = [
   "POST /users/login",
   "POST /users/register",
   "GET /public/stats",
+  "GET /demo/accounts",
+  "POST /demo/login",
 ];
 
 const isPublic = (req) => {
@@ -283,6 +285,72 @@ app.post("/users/login", async (req, res) => {
     });
   } catch (err) {
     console.error("Login error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Demo sign-in
+//--------------------------------------------------------------
+// One-click access to the four seeded demo accounts, for showing the app.
+//
+// The buttons this serves used to work by shipping the shared demo password
+// inside the frontend bundle, which meant publishing it - anyone who opened
+// devtools had it, and people reuse passwords. The server hands out the
+// session instead: the four addresses below are the only ones it will ever
+// issue this way, and no credential exists in the client to leak.
+//
+// Set DEMO_LOGIN=off in the environment to switch the whole thing off without
+// a redeploy, once the app is holding data that matters.
+const DEMO_LOGIN_ENABLED = String(process.env.DEMO_LOGIN || "on").toLowerCase() !== "off";
+
+const DEMO_ACCOUNTS = {
+  "Coordinator": "sofia.manthou@turtleguard.demo",
+  "Field Leader": "elena.papadaki@turtleguard.demo",
+  "Field Assistant": "nikos.floros@turtleguard.demo",
+  "Volunteer": "maria.karydi@turtleguard.demo",
+};
+
+app.get("/demo/accounts", (req, res) => {
+  // The client renders one button per entry. Labels only - no addresses, so
+  // the page still gives away nothing usable if demo mode is later turned off.
+  res.json({
+    enabled: DEMO_LOGIN_ENABLED,
+    roles: DEMO_LOGIN_ENABLED ? Object.keys(DEMO_ACCOUNTS) : [],
+  });
+});
+
+app.post("/demo/login", async (req, res) => {
+  if (!DEMO_LOGIN_ENABLED) {
+    return res.status(403).json({ error: "Demo access is disabled." });
+  }
+
+  const label = String(req.body?.role || "");
+  const email = DEMO_ACCOUNTS[label];
+  if (!email) {
+    return res.status(400).json({ error: "Unknown demo role." });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT id, first_name, last_name, email, role, station,
+              is_active, is_email_verified, is_password_reset_needed
+       FROM users WHERE LOWER(email) = $1 LIMIT 1;`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "That demo account is not set up on this database." });
+    }
+
+    const user = result.rows[0];
+    // A demo account that has been deactivated was deactivated on purpose.
+    if (!user.is_active) {
+      return res.status(403).json({ error: "That demo account is inactive." });
+    }
+
+    res.json({ message: "Demo login successful", token: signToken(user), user });
+  } catch (err) {
+    console.error("Demo login error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
