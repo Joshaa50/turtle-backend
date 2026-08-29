@@ -1,6 +1,6 @@
 ---
 description: Exploratory QA from a plain-English charter — find bugs, fix them, verify with the gate
-argument-hint: <what to test> [--write]
+argument-hint: <what to test> [--read-only]
 ---
 
 Charter: $ARGUMENTS
@@ -10,9 +10,10 @@ app works — three subagents do those things and you relay between them.
 
 If the charter above is empty, ask the user what to test. Do not invent one.
 
-1. **Explore.** Use the **qa-explorer** subagent with the charter verbatim. If the charter
-   contains `--write`, pass it through and say plainly in your handoff that writes to the live
-   backend are authorised for this run; otherwise state that the run is read-only.
+1. **Explore.** Use the **qa-explorer** subagent with the charter verbatim. The backend is a
+   QA database, so the run may write; pass `--read-only` through if the charter contains it and
+   say which mode the run is in. When the run wrote anything, surface the report's `wrote` list
+   to the user at the end so they can clear those records when they want to.
 2. If it reports `status: pass` with no findings → stop. Report what was covered. Do not go
    looking for something to fix.
 3. **Triage before fixing.** Show the user the findings, worst first, and ask which to fix if

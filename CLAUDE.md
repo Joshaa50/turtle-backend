@@ -19,6 +19,14 @@ npm run qa      # node --check + vitest run, exits non-zero on any failure
 Or `/qa-loop` from the workspace root to run both projects' gates and drive the
 qa-tester → fixer → qa-tester cycle.
 
+## QA data
+
+The deployed backend is currently the project's **QA database** — exploratory runs write to it.
+Anything an agent creates is named `QA-*`, and `npm run qa:cleanup` lists those records
+(add `--confirm` to delete them; `--emergence-ids 12,13` for emergences, which have no name).
+Cleanup goes through the API as the demo Coordinator, so it needs no database credentials and
+obeys the same guards a person does — including archiving a turtle before it can be deleted.
+
 ## Testing conventions
 
 - Vitest + supertest, in `tests/`. Test files are ESM; `server.js` stays CommonJS.
