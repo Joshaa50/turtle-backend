@@ -90,8 +90,8 @@ const requireRole = (...roles) => (req, res, next) => {
 // is what actually protects the data - CORS is a browser policy, not a lock.
 const ALLOWED_ORIGINS = [
   "https://joshaa50.github.io",
-  "http://localhost:5173",
-  "http://localhost:4173",
+  "http://localhost:3000",   // vite dev (see turtle-frontend/vite.config.ts)
+  "http://localhost:4173",   // vite preview
 ];
 
 app.use(
