@@ -3,13 +3,107 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 
 const app = express();
-app.use(cors());
-// app.use(express.json());
-// // Add this near the top of your server.js
+
+// ---------------------------------------------------------------------------
+// Authentication
+//
+// Everything the browser downloads is public - the login screen included - so
+// the client can never be the thing that decides who gets data. This server is.
+// Every route below is closed unless it appears in PUBLIC_ROUTES, so a route
+// added later is protected by default rather than open by default.
+// ---------------------------------------------------------------------------
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  // Refuse to boot rather than start up unprotected. A server that silently
+  // accepts every request is worse than one that is visibly down.
+  console.error("FATAL: JWT_SECRET is not set. Refusing to start.");
+  process.exit(1);
+}
+
+// Field days are long and often offline, so a token that expired mid-survey
+// would be its own kind of data loss.
+const TOKEN_TTL = "12h";
+
+const COORDINATOR = "Project Coordinator";
+const LEADER = "Field Leader";
+
+const signToken = (user) =>
+  jwt.sign({ sub: String(user.id), role: user.role, email: user.email }, JWT_SECRET, {
+    expiresIn: TOKEN_TTL,
+  });
+
+// Routes reachable without a token, as "METHOD /path" or a RegExp.
+const PUBLIC_ROUTES = [
+  "GET /test",
+  "POST /users/login",
+  "POST /users/register",
+  "GET /public/stats",
+];
+
+const isPublic = (req) => {
+  const target = `${req.method} ${req.path}`;
+  return PUBLIC_ROUTES.some((r) => (r instanceof RegExp ? r.test(target) : r === target));
+};
+
+const requireAuth = (req, res, next) => {
+  // The browser's CORS preflight carries no Authorization header by design.
+  if (req.method === "OPTIONS") return next();
+  if (isPublic(req)) return next();
+
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Authentication required." });
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = { id: payload.sub, role: payload.role, email: payload.email };
+    return next();
+  } catch (err) {
+    // Distinguish the two so the client can tell "log in again" from "something
+    // is wrong", and so an expired token doesn't look like an attack in the logs.
+    const expired = err.name === "TokenExpiredError";
+    return res.status(401).json({
+      error: expired ? "Session expired. Please sign in again." : "Invalid session.",
+      expired,
+    });
+  }
+};
+
+// Guards a route to a set of roles. Always mounted after requireAuth, so
+// req.user is present by the time this runs.
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: "Authentication required." });
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({ error: "You do not have permission to do that." });
+  }
+  return next();
+};
+
+// Only these origins may call the API with credentials. Requests with no Origin
+// header (curl, server-to-server, health checks) still reach requireAuth, which
+// is what actually protects the data - CORS is a browser policy, not a lock.
+const ALLOWED_ORIGINS = [
+  "https://joshaa50.github.io",
+  "http://localhost:5173",
+  "http://localhost:4173",
+];
+
+app.use(
+  cors({
+    origin: (origin, cb) =>
+      !origin || ALLOWED_ORIGINS.includes(origin)
+        ? cb(null, true)
+        : cb(new Error("Origin not allowed")),
+  })
+);
+
 app.use(express.json({ limit: '10mb' })); 
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use(requireAuth);
 
 // Connect to Neon
 const db = new Pool({
@@ -80,9 +174,13 @@ app.post("/users/register", async (req, res) => {
 // Get all users endpoint
 app.get("/users", async (req, res) => {
   try {
+    // Never `SELECT *` here: the row carries password_hash, and this response
+    // is serialised straight to the client.
     const sql = `
-      SELECT 
-        *
+      SELECT
+        id, first_name, last_name, email, role, station,
+        is_active, is_email_verified, is_password_reset_needed,
+        created_at, profile_picture
       FROM users
       ORDER BY station ASC, last_name ASC;
     `;
@@ -111,7 +209,14 @@ app.get("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    const sql = `SELECT * FROM users WHERE id = $1 LIMIT 1;`;
+    // Explicit columns - password_hash must never leave the server.
+    const sql = `
+      SELECT
+        id, first_name, last_name, email, role, station,
+        is_active, is_email_verified, is_password_reset_needed,
+        created_at, profile_picture
+      FROM users WHERE id = $1 LIMIT 1;
+    `;
     const result = await db.query(sql, [id]);
 
     if (result.rows.length === 0) {
@@ -149,10 +254,22 @@ app.post("/users/login", async (req, res) => {
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.status(401).json({ error: "Invalid email or password." });
 
-    if (!user.is_active) return res.status(403).json({ error: "Account is inactive." });
+    // Status is only revealed once the password checks out. The client used to
+    // fetch the whole user list before login to work this out, which handed
+    // every account to anyone who opened the login page.
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is inactive.", reason: "INACTIVE" });
+    }
+    if (user.is_email_verified === false) {
+      return res.status(403).json({
+        error: "Your account has not been verified by the field leader yet.",
+        reason: "UNVERIFIED",
+      });
+    }
 
     res.json({
       message: "Login successful",
+      token: signToken(user),
       user: {
         id: user.id,
         first_name: user.first_name,
@@ -170,12 +287,124 @@ app.post("/users/login", async (req, res) => {
   }
 });
 
+// Account recovery
+//--------------------------------------------------------------
+// Both of these are reachable without a token, so both answer identically
+// whether or not the address exists - otherwise they become a way to test which
+// emails have accounts.
+
+app.post("/users/request-password-reset", async (req, res) => {
+  const generic = { message: "If that account exists, a reset request has been sent." };
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    await db.query(
+      "UPDATE users SET is_password_reset_needed = true WHERE LOWER(email) = $1;",
+      [email]
+    );
+    res.json(generic);
+  } catch (err) {
+    console.error("Password reset request error:", err);
+    res.json(generic);
+  }
+});
+
+app.post("/users/request-reactivation", async (req, res) => {
+  const generic = { message: "If that account exists, your request has been sent for approval." };
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    // Puts a deactivated account back in the field leader's approval queue
+    // rather than restoring access: is_email_verified = false keeps the login
+    // route rejecting it until a leader actually approves. The client used to
+    // send these two columns itself, which meant anyone could reactivate any
+    // account by name.
+    await db.query(
+      `UPDATE users SET is_active = true, is_email_verified = false
+       WHERE LOWER(email) = $1 AND is_active = false;`,
+      [email]
+    );
+    res.json(generic);
+  } catch (err) {
+    console.error("Reactivation request error:", err);
+    res.json(generic);
+  }
+});
+
+// Public season totals
+//--------------------------------------------------------------
+// The pre-login stats page used to read the entire nest table, which handed out
+// the GPS position of every nest to anyone who opened it. Aggregate here
+// instead, so nothing location-bearing leaves the server unauthenticated.
+app.get("/public/stats", async (req, res) => {
+  try {
+    // Excavations and emergences count the same hatchlings, so they must never
+    // be summed together - an excavation is the authoritative census and wins
+    // outright, and only in its absence do the nightly emergence logs stand in.
+    // This mirrors tallyHatchlings() in the frontend's lib/nestStats.ts.
+    const sql = `
+      WITH excavation AS (
+        SELECT DISTINCT ON (nest_code)
+               nest_code, COALESCE(hatched_count, 0) AS n
+        FROM turtle_nest_events
+        WHERE event_type LIKE '%INVENTORY%'
+        ORDER BY nest_code, created_at DESC, id DESC
+      ),
+      emergence AS (
+        SELECT nest_code,
+               SUM(COALESCE(tracks_to_sea, 0) + COALESCE(tracks_lost, 0)) AS n
+        FROM turtle_nest_events
+        WHERE event_type IN ('EMERGENCE', 'HATCHING')
+        GROUP BY nest_code
+      )
+      SELECT
+        COUNT(*)::int AS total_nests,
+        COALESCE(SUM(n.total_num_eggs), 0)::int AS total_eggs,
+        COUNT(*) FILTER (WHERE LOWER(n.status) = 'hatched')::int AS nests_hatched,
+        COALESCE(SUM(COALESCE(x.n, e.n, 0)), 0)::int AS hatchlings_released
+      FROM turtle_nests n
+      LEFT JOIN excavation x ON x.nest_code = n.nest_code
+      LEFT JOIN emergence  e ON e.nest_code = n.nest_code;
+    `;
+
+    const result = await db.query(sql);
+    res.json({ message: "Public stats fetched successfully", stats: result.rows[0] });
+  } catch (err) {
+    console.error("Public stats error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Update user endpoint
+// Fields a user may change on their own record.
+const SELF_EDITABLE = new Set([
+  "first_name", "last_name", "email", "station", "profile_picture", "password_hash",
+]);
+
+// Fields only a coordinator or field leader may change - these decide who can
+// sign in and what they can do, so they are never self-serve.
+const PRIVILEGED_EDITABLE = new Set([
+  "role", "is_active", "is_email_verified", "is_password_reset_needed",
+]);
+
 app.patch("/users/:id", async (req, res) => {
   const userId = req.params.id;
   const updates = { ...req.body };
 
-  const forbiddenFields = ["id", "created_at"];
+  const isPrivileged = req.user.role === COORDINATOR || req.user.role === LEADER;
+  const isSelf = String(req.user.id) === String(userId);
+
+  if (!isPrivileged && !isSelf) {
+    return res.status(403).json({ error: "You can only edit your own profile." });
+  }
+
+  // Only a coordinator may create or change another coordinator, so a field
+  // leader cannot promote themselves past their own ceiling.
+  if (updates.role === COORDINATOR && req.user.role !== COORDINATOR) {
+    return res.status(403).json({ error: "Only a project coordinator can assign that role." });
+  }
 
   // If a plain-text password was sent, hash it and swap it out before building keys
   if (updates.password) {
@@ -185,15 +414,27 @@ app.patch("/users/:id", async (req, res) => {
 
   // If a profile picture was sent, strip data URL prefix if present and convert to buffer
   if (updates.profile_picture) {
-    console.log("First 100 chars:", updates.profile_picture.substring(0, 100));
-    console.log("Includes data prefix:", updates.profile_picture.includes('data:'));
     const base64Data = updates.profile_picture.includes('data:')
       ? updates.profile_picture.split(',')[1]
       : updates.profile_picture;
     updates.profile_picture = Buffer.from(base64Data, "base64");
   }
 
-  const keys = Object.keys(updates).filter(key => !forbiddenFields.includes(key));
+  // An allowlist rather than a denylist. Column names are interpolated into the
+  // SET clause below, so anything not on this list is both an authorisation
+  // hole and an injection point - previously any key in the body reached the
+  // UPDATE, which meant an anonymous caller could set their own role.
+  const allowed = new Set(SELF_EDITABLE);
+  if (isPrivileged) for (const f of PRIVILEGED_EDITABLE) allowed.add(f);
+
+  const keys = Object.keys(updates).filter(key => allowed.has(key));
+  const rejected = Object.keys(updates).filter(key => !allowed.has(key));
+
+  if (rejected.length > 0) {
+    return res.status(403).json({
+      error: `Not allowed to change: ${rejected.join(", ")}.`,
+    });
+  }
 
   if (keys.length === 0) {
     return res.status(400).json({ error: "No valid fields provided for update." });
@@ -598,7 +839,7 @@ app.get("/turtles/:id", async (req, res) => {
 // Survey events have no meaning without the turtle they describe, so they go
 // with it. Both statements run in one transaction: a half-deleted turtle would
 // leave events pointing at a missing row, which the records screen reads.
-app.delete("/turtles/:id", async (req, res) => {
+app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
@@ -1648,7 +1889,7 @@ app.put("/emergences/:id", async (req, res) => {
 // Emergences list, so it becomes a standalone row rather than vanishing. Once
 // the nest is gone it is no longer referenced, so it can be deleted separately
 // if wanted.
-app.delete("/nests/:id", async (req, res) => {
+app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
@@ -1700,7 +1941,7 @@ app.delete("/nests/:id", async (req, res) => {
 // those would strip data off a nest that is still in the season's records, so
 // this refuses and names the nest instead of cascading. Links from morning
 // surveys are just join rows and are removed with it.
-app.delete("/emergences/:id", async (req, res) => {
+app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
@@ -1778,7 +2019,7 @@ app.get("/shifts", async (req, res) => {
 //--------------------------------------------------------------
 
 // Create a new shift assignment
-app.post('/timetable/create', async (req, res) => {
+app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
   if (!user_id || !shift_id || !work_date) {
@@ -1847,7 +2088,7 @@ app.get("/timetable/week", async (req, res) => {
 });
 
 // Delete a specific assignment from the timetable
-app.delete("/timetable/remove", async (req, res) => {
+app.delete("/timetable/remove", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
 
   if (!user_id || !shift_id || !work_date) {
