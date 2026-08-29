@@ -769,9 +769,54 @@ app.post("/turtles/create", async (req, res) => {
 });
 
 // Get all turtles endpoint
+// Turtles are archived, not deleted
+//--------------------------------------------------------------
+// A turtle record is years of longitudinal data on one animal, and deleting it
+// cascades through every survey event, measurement and sighting attached to it.
+// Archiving hides it from the working lists while keeping all of that.
+//
+// Additive and idempotent, so it is safe to run on every boot: the column is
+// created once and the statement is a no-op afterwards. Nests already carry the
+// same flag, which is where the pattern comes from.
+(async () => {
+  try {
+    await db.query(
+      "ALTER TABLE turtles ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;"
+    );
+    console.log("turtles.is_archived is present.");
+  } catch (err) {
+    console.error("Could not ensure turtles.is_archived:", err.message);
+  }
+})();
+
+app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const archived = req.body?.archived !== false; // default to archiving
+
+    const result = await db.query(
+      `UPDATE turtles SET is_archived = $1 WHERE id = $2
+       RETURNING id, name, is_archived;`,
+      [archived, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Turtle not found." });
+    }
+
+    res.json({
+      message: archived ? "Turtle archived." : "Turtle restored.",
+      turtle: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Archive turtle error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 app.get("/turtles", async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM turtles ORDER BY created_at DESC;");
+    const result = await db.query("SELECT * FROM turtles ORDER BY is_archived ASC, created_at DESC;");
 
     res.json({
       message: "Turtles fetched successfully",
@@ -985,11 +1030,28 @@ app.get("/turtles/:id", async (req, res) => {
 // Survey events have no meaning without the turtle they describe, so they go
 // with it. Both statements run in one transaction: a half-deleted turtle would
 // leave events pointing at a missing row, which the records screen reads.
+// Kept as the purge path for records created in error, but it is no longer
+// something a misclick can reach: the turtle has to be archived first, so
+// destroying one is always two deliberate steps taken at different times. The
+// app's own UI archives and never calls this.
 app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
   try {
+    const existing = await client.query(
+      "SELECT is_archived FROM turtles WHERE id = $1 LIMIT 1;",
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Turtle not found." });
+    }
+    if (!existing.rows[0].is_archived) {
+      return res.status(409).json({
+        error: "Archive this turtle before deleting it. Deleting also removes every survey event and measurement recorded against the animal.",
+      });
+    }
+
     await client.query("BEGIN");
 
     const events = await client.query(
