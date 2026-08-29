@@ -8,7 +8,9 @@
     "test:watch": "vitest",
     "qa": "bash scripts/qa-check.sh",
     "start": "node server.js",
-    "qa:cleanup": "node scripts/qa-cleanup.mjs"
+    "qa:cleanup": "node scripts/qa-cleanup.mjs",
+    "qa:seed": "node scripts/qa-seed.mjs",
+    "qa:audit": "node scripts/qa-cleanup.mjs --audit"
   },
   "keywords": [],
   "author": "",

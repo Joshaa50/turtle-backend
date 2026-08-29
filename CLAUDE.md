@@ -22,10 +22,26 @@ qa-tester → fixer → qa-tester cycle.
 ## QA data
 
 The deployed backend is currently the project's **QA database** — exploratory runs write to it.
-Anything an agent creates is named `QA-*`, and `npm run qa:cleanup` lists those records
-(add `--confirm` to delete them; `--emergence-ids 12,13` for emergences, which have no name).
-Cleanup goes through the API as the demo Coordinator, so it needs no database credentials and
-obeys the same guards a person does — including archiving a turtle before it can be deleted.
+Three scripts look after what is in it; all go through the API as the demo Coordinator, so none
+of them need database credentials, and all obey the same guards a person gets (including
+archiving a turtle before it can be deleted). Nothing writes or deletes without `--confirm`.
+
+| Command | What it does |
+| --- | --- |
+| `npm run qa:audit` | Reports records that cannot be true (−1 eggs) or look wrong (a nest dated in March). Never deletes. |
+| `npm run qa:seed` | Previews realistic nests/turtles/emergences; `-- --confirm` creates them. |
+| `npm run qa:cleanup` | Lists `QA-*` records from exploratory runs; `--confirm` deletes them. |
+
+Also: `--manifest qa-out/seed-manifest.json --confirm` removes everything ever seeded (the
+manifest accumulates across runs), and `--delete-ids nest:35,turtle:8` removes named records.
+
+`scripts/lib/plausibility.mjs` holds the ranges, and is the single source of truth for **both**
+the auditor and the seeder — so seeded data passes the audit by construction rather than by
+luck. The ranges are field-realistic for Mediterranean loggerheads on Kefalonia and are
+deliberately generous; they are covered by `tests/plausibility.test.js`, whose "good" cases are
+real records from the database, so widening a range cannot quietly start flagging real
+fieldwork. Seeded records are deliberately **not** marked as fake — a demo where every row is
+stamped QA- demos nothing; the manifest is what makes them removable.
 
 ## Testing conventions
 
