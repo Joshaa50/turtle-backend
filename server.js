@@ -475,6 +475,84 @@ app.patch("/users/:id", async (req, res) => {
   }
 });
 
+// Delete own account
+//--------------------------------------------------------------
+// Self-service only, and irreversible. A coordinator who wants to remove
+// somebody else deactivates them instead - that keeps the record and can be
+// undone, which is almost always what "remove this person" actually means.
+//
+// Field records survive. Every one of them stores the observer as a name
+// string rather than a reference to this row, so the person's name stays on
+// the nests, tags and excavations they recorded after the account is gone.
+// The only real link is the shift rota, and a deleted user cannot hold a
+// future shift, so those rows go with them.
+app.delete("/users/:id", async (req, res) => {
+  const { id } = req.params;
+
+  if (String(req.user.id) !== String(id)) {
+    return res.status(403).json({
+      error: "You can only delete your own account. To remove someone else, deactivate their account instead.",
+    });
+  }
+
+  // Re-authenticate. This is the one action in the app that cannot be undone,
+  // and a token in an unattended browser should not be enough to trigger it.
+  const { password } = req.body || {};
+  if (!password) {
+    return res.status(400).json({ error: "Password confirmation is required." });
+  }
+
+  // Acquired inside the try: a pool failure here would otherwise escape the
+  // handler and Express would answer with a stack trace naming server paths.
+  let client;
+  try {
+    client = await db.connect();
+    const found = await client.query(
+      "SELECT id, role, password_hash FROM users WHERE id = $1 LIMIT 1;",
+      [id]
+    );
+    if (found.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const account = found.rows[0];
+    const match = await bcrypt.compare(password, account.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: "Password is incorrect." });
+    }
+
+    // Losing the last coordinator would leave nobody able to verify new
+    // accounts or reactivate old ones - the app would still run, but no one
+    // could ever be let back into it.
+    if (account.role === COORDINATOR) {
+      const others = await client.query(
+        "SELECT COUNT(*)::int AS n FROM users WHERE role = $1 AND is_active = true AND id <> $2;",
+        [COORDINATOR, id]
+      );
+      if (others.rows[0].n === 0) {
+        return res.status(409).json({
+          error: "You are the only active project coordinator. Promote someone else before deleting your account.",
+        });
+      }
+    }
+
+    await client.query("BEGIN");
+    // Explicit rather than relying on a cascade, so this behaves the same
+    // whether or not the constraint was declared with one.
+    await client.query("DELETE FROM Timetable WHERE user_id = $1;", [id]);
+    await client.query("DELETE FROM users WHERE id = $1;", [id]);
+    await client.query("COMMIT");
+
+    res.json({ message: "Account deleted." });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("Delete account error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 // Turtles table
 //--------------------------------------------------------------
 // Create Turtle endpoint
