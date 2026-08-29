@@ -114,15 +114,18 @@ const db = new Pool({
   family: 4 // Force IPv4 for Render
 });
 
-// Test DB connection
-(async () => {
-  try {
-    const res = await db.query("SELECT NOW()");
-    console.log("Connected to Neon Postgres! Time:", res.rows[0].now);
-  } catch (err) {
-    console.error("Database connection error:", err);
-  }
-})();
+// Test DB connection. Only when this file is the process being run - importing
+// it (the test suite does) must not open a socket to production.
+if (require.main === module) {
+  (async () => {
+    try {
+      const res = await db.query("SELECT NOW()");
+      console.log("Connected to Neon Postgres! Time:", res.rows[0].now);
+    } catch (err) {
+      console.error("Database connection error:", err);
+    }
+  })();
+}
 
 // Test endpoint
 app.get("/test", (req, res) => {
@@ -777,17 +780,20 @@ app.post("/turtles/create", async (req, res) => {
 //
 // Additive and idempotent, so it is safe to run on every boot: the column is
 // created once and the statement is a no-op afterwards. Nests already carry the
-// same flag, which is where the pattern comes from.
-(async () => {
-  try {
-    await db.query(
-      "ALTER TABLE turtles ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;"
-    );
-    console.log("turtles.is_archived is present.");
-  } catch (err) {
-    console.error("Could not ensure turtles.is_archived:", err.message);
-  }
-})();
+// same flag, which is where the pattern comes from. On boot only - importing
+// the module for tests must not issue DDL against a live database.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(
+        "ALTER TABLE turtles ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;"
+      );
+      console.log("turtles.is_archived is present.");
+    } catch (err) {
+      console.error("Could not ensure turtles.is_archived:", err.message);
+    }
+  })();
+}
 
 app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
   try {
@@ -2782,8 +2788,15 @@ app.post("/ai/analyze-audio", async (req, res) => {
   }
 });
 
-// Start server
+// Start server. Guarded so `require("./server")` gives the tests an app to
+// drive without binding a port; `node server.js` in production is unchanged.
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+// `db` is exported so tests can stub `db.query` on the pool instance rather
+// than mocking the pg module - the pool never connects if it is never queried.
+module.exports = { app, db, signToken };

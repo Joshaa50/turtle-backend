@@ -1,3 +1,7 @@
 node_modules
 .env
 .DS_Store
+
+# QA loop artifacts
+qa-out/
+qa-report.json
