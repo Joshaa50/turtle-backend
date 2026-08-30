@@ -225,6 +225,23 @@ const invalidNest = (body) => {
 // stay on the narrower COORDINATOR/LEADER guards.
 const RECORDERS = [COORDINATOR, LEADER, "Field Assistant", "Field Volunteer"];
 
+// Field Volunteers record like everyone else, but their submissions are held
+// for a Field Leader to confirm before they count as reviewed fieldwork. The
+// record itself is stored immediately - a volunteer on a beach at dawn must
+// never lose an observation waiting for a reviewer to wake up.
+const VOLUNTEER = "Field Volunteer";
+const REVIEWERS = [COORDINATOR, LEADER];
+
+// The record types that can carry a review. Keyed by the table the id belongs
+// to, so a review row can be resolved back to the thing it describes.
+const REVIEWABLE = {
+  nest: { table: "turtle_nests", label: "Nest", describe: "nest_code" },
+  turtle: { table: "turtles", label: "Turtle", describe: "name" },
+  nest_event: { table: "turtle_nest_events", label: "Nest event", describe: "event_type" },
+  emergence: { table: "turtle_emergences", label: "Emergence", describe: "beach" },
+  morning_survey: { table: "morning_surveys", label: "Morning survey", describe: "beach" },
+};
+
 // Only these origins may call the API with credentials. Requests with no Origin
 // header (curl, server-to-server, health checks) still reach requireAuth, which
 // is what actually protects the data - CORS is a browser policy, not a lock.
@@ -910,9 +927,12 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       total_tail_length
     ]);
 
+    const review = await queueReviewSafely("turtle", result.rows[0]?.id, req);
+
     res.json({
       message: "Turtle record created successfully",
-      turtle: result.rows[0]
+      turtle: result.rows[0],
+      review
     });
   } catch (err) {
     console.error("Create turtle error:", err);
@@ -943,6 +963,77 @@ if (require.main === module) {
     }
   })();
 }
+
+//--------------------------------------------------------------
+// Volunteer submissions awaiting a Field Leader's confirmation.
+//
+// One table keyed by (record_type, record_id) rather than a status column on
+// each of the five reviewable tables: it is additive, so every existing query
+// keeps its shape, and a record with no row here simply was not submitted for
+// review. Same boot-time, idempotent pattern as turtles.is_archived above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS record_reviews (
+          id SERIAL PRIMARY KEY,
+          record_type TEXT NOT NULL,
+          record_id INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          submitted_by INTEGER,
+          submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reviewed_by INTEGER,
+          reviewed_at TIMESTAMPTZ,
+          review_note TEXT,
+          UNIQUE (record_type, record_id)
+        );
+      `);
+      await db.query(
+        "CREATE INDEX IF NOT EXISTS record_reviews_status_idx ON record_reviews (status);"
+      );
+      console.log("record_reviews is present.");
+    } catch (err) {
+      console.error("Could not ensure record_reviews:", err.message);
+    }
+  })();
+}
+
+// A volunteer's write is held for review; everyone else's is already reviewed
+// fieldwork by virtue of who recorded it.
+const needsReview = (req) => req.user?.role === VOLUNTEER;
+
+// Queues one record for review. `executor` is the pool or an open transaction
+// client, so a route that already runs in a transaction enrols the review row
+// in the same one and the pair cannot half-commit.
+//
+// ON CONFLICT DO NOTHING because re-submitting an already-queued record must
+// not reset a decision a reviewer has already made.
+const queueReview = async (executor, recordType, recordId, req) => {
+  if (!needsReview(req) || recordId == null) return null;
+  const result = await executor.query(
+    `INSERT INTO record_reviews (record_type, record_id, submitted_by)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (record_type, record_id) DO NOTHING
+     RETURNING id, record_type, record_id, status, submitted_at;`,
+    [recordType, recordId, req.user?.id ?? null]
+  );
+  return result.rows[0] || null;
+};
+
+// Outside a transaction the record is already committed by the time this runs,
+// so a failure here must not turn a saved observation into an error for the
+// person who recorded it. It is logged loudly instead: the cost is a volunteer
+// record that misses the queue, which a reviewer can still find in the normal
+// lists, and that is strictly better than telling a field worker their save
+// failed when it did not.
+const queueReviewSafely = async (recordType, recordId, req) => {
+  try {
+    return await queueReview(db, recordType, recordId, req);
+  } catch (err) {
+    console.error(`Could not queue ${recordType} ${recordId} for review:`, err.message);
+    return null;
+  }
+};
 
 app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
   try {
@@ -1538,12 +1629,17 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
       ]
     );
 
+    // Enrolled in the same transaction as the nest, so a volunteer's record and
+    // its place in the review queue commit together or not at all.
+    const review = await queueReview(client, "nest", nestResult.rows[0]?.id, req);
+
     await client.query("COMMIT");
 
     res.json({
       message: "Nest and emergence created successfully",
       nest: nestResult.rows[0],
-      emergence_id
+      emergence_id,
+      review
     });
 
   } catch (err) {
@@ -1944,7 +2040,8 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     ];
 
     const result = await db.query(sql, values);
-    res.json({ message: "Turtle nest event created successfully", event: result.rows[0] });
+    const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
+    res.json({ message: "Turtle nest event created successfully", event: result.rows[0], review });
 
   } catch (err) {
     console.error("Create turtle nest event error:", err);
@@ -2174,9 +2271,12 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
       track_sketch
     ]);
 
+    const review = await queueReviewSafely("emergence", result.rows[0]?.id, req);
+
     res.status(201).json({
       message: "Emergence recorded successfully",
-      emergence: result.rows[0]
+      emergence: result.rows[0],
+      review
     });
   } catch (err) {
     console.error("Create emergence error:", err);
@@ -2599,9 +2699,12 @@ app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
 
     const result = await db.query(sql, values);
 
+    const review = await queueReviewSafely("morning_survey", result.rows[0]?.id, req);
+
     res.status(201).json({
       message: "Morning survey recorded successfully",
-      survey: result.rows[0]
+      survey: result.rows[0],
+      review
     });
 
   } catch (err) {
@@ -2819,6 +2922,142 @@ const getAiClient = () => {
 };
 
 // Natural-language questions about nest records -> { text?, chart? }
+//--------------------------------------------------------------
+// Review queue
+//
+// A Field Volunteer's records are stored immediately and listed like any
+// other - what a review adds is a Field Leader's confirmation on top. So
+// nothing here gates reading or writing field data; it only tracks decisions.
+//--------------------------------------------------------------
+
+// Resolves review rows to a short description of the record each one points at.
+// One query per record type present, rather than a five-way LEFT JOIN that
+// would be unreadable and mostly NULL.
+const describeReviewedRecords = async (rows) => {
+  const byType = new Map();
+  for (const r of rows) {
+    if (!REVIEWABLE[r.record_type]) continue;
+    if (!byType.has(r.record_type)) byType.set(r.record_type, []);
+    byType.get(r.record_type).push(r.record_id);
+  }
+
+  const labels = new Map();
+  for (const [type, ids] of byType) {
+    const { table, describe } = REVIEWABLE[type];
+    // Table and column come from REVIEWABLE, never from the request, so they
+    // are safe to interpolate; the ids stay parameterised.
+    const found = await db.query(
+      `SELECT id, ${describe} AS label FROM ${table} WHERE id = ANY($1::int[]);`,
+      [ids]
+    );
+    for (const row of found.rows) labels.set(`${type}:${row.id}`, row.label);
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    record_label: labels.get(`${r.record_type}:${r.record_id}`) ?? null,
+    record_kind: REVIEWABLE[r.record_type]?.label ?? r.record_type,
+    // A record that no longer exists was deleted after being submitted. Say so
+    // rather than showing a reviewer a blank row they cannot act on.
+    record_missing: !labels.has(`${r.record_type}:${r.record_id}`),
+  }));
+};
+
+const REVIEW_SELECT = `
+  SELECT r.id, r.record_type, r.record_id, r.status,
+         r.submitted_by, r.submitted_at, r.reviewed_by, r.reviewed_at, r.review_note,
+         s.first_name AS submitted_by_first_name, s.last_name AS submitted_by_last_name,
+         v.first_name AS reviewed_by_first_name, v.last_name AS reviewed_by_last_name
+  FROM record_reviews r
+  LEFT JOIN users s ON s.id = r.submitted_by
+  LEFT JOIN users v ON v.id = r.reviewed_by
+`;
+
+// The queue a Field Leader works through. Defaults to pending, which is the
+// only status that needs action.
+app.get("/reviews", requireRole(...REVIEWERS), async (req, res) => {
+  try {
+    const status = req.query.status || "pending";
+    if (!["pending", "approved", "rejected", "all"].includes(status)) {
+      return res.status(400).json({ error: "status must be pending, approved, rejected or all." });
+    }
+
+    const result = await db.query(
+      `${REVIEW_SELECT}
+       ${status === "all" ? "" : "WHERE r.status = $1"}
+       ORDER BY r.submitted_at DESC
+       LIMIT 200;`,
+      status === "all" ? [] : [status]
+    );
+
+    res.json({ reviews: await describeReviewedRecords(result.rows) });
+  } catch (err) {
+    console.error("List reviews error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// A volunteer's own submissions, so they can see what has been confirmed
+// without being able to read anyone else's queue.
+app.get("/reviews/mine", async (req, res) => {
+  try {
+    const result = await db.query(
+      `${REVIEW_SELECT} WHERE r.submitted_by = $1 ORDER BY r.submitted_at DESC LIMIT 200;`,
+      [req.user.id]
+    );
+    res.json({ reviews: await describeReviewedRecords(result.rows) });
+  } catch (err) {
+    console.error("List own reviews error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Approve or reject. One handler because the two differ only in the status
+// they write and whether a note is expected.
+const decideReview = (decision) => async (req, res) => {
+  try {
+    const { id } = req.params;
+    const note = typeof req.body?.note === "string" ? req.body.note.trim() : null;
+
+    // A rejection without a reason is not actionable by the person who
+    // recorded it - they cannot tell what to correct.
+    if (decision === "rejected" && !note) {
+      return res.status(400).json({ error: "A rejection needs a note saying what to correct." });
+    }
+
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET status = $1, reviewed_by = $2, reviewed_at = NOW(), review_note = $3
+       WHERE id = $4 AND status = 'pending'
+       RETURNING id;`,
+      [decision, req.user.id, note, id]
+    );
+
+    if (result.rows.length === 0) {
+      // Either it never existed or someone else already decided it. Both mean
+      // "your click did nothing", and a reviewer needs to know which.
+      const existing = await db.query("SELECT status FROM record_reviews WHERE id = $1;", [id]);
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Review not found." });
+      }
+      return res.status(409).json({
+        error: `Already ${existing.rows[0].status} by someone else.`,
+        status: existing.rows[0].status,
+      });
+    }
+
+    const full = await db.query(`${REVIEW_SELECT} WHERE r.id = $1;`, [id]);
+    const [review] = await describeReviewedRecords(full.rows);
+    res.json({ message: `Record ${decision}.`, review });
+  } catch (err) {
+    console.error(`Review ${decision} error:`, err);
+    res.status(500).json({ error: "Server error." });
+  }
+};
+
+app.post("/reviews/:id/approve", requireRole(...REVIEWERS), decideReview("approved"));
+app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
+
 app.post("/ai/nest-query", async (req, res) => {
   try {
     const { query, nests } = req.body;
