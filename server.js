@@ -85,6 +85,146 @@ const requireRole = (...roles) => (req, res, next) => {
   return next();
 };
 
+// ---------------------------------------------------------------------------
+// Numeric bounds
+//
+// The forms check these too, but everything the browser downloads is public, so
+// the client can never be the thing that decides what gets stored - a clutch of
+// -500 eggs reached this database through the API, not through a form.
+//
+// These are hard "cannot be true" limits, deliberately wider than the
+// field-realistic ranges in scripts/lib/plausibility.mjs: the auditor's job is
+// to flag an unusual record, this one's is to refuse an impossible one. A
+// rejection says which field and what the bounds are, so a field worker who
+// mistypes a measurement is told what to fix instead of "Server error."
+// ---------------------------------------------------------------------------
+
+const EGGS = { min: 0, max: 300 };          // largest recorded loggerhead clutch is ~200
+const CM = { min: 0, max: 200 };            // nest depths and widths
+const METRES = { min: 0, max: 1000 };       // distance to sea, triangulation legs
+const COUNT = { min: 0, max: 1000 };        // hatchlings, tracks, excavation tallies
+const MEASUREMENT = { min: 0, max: 250 };   // cm; a leatherback reaches ~180
+const LAT = { min: -90, max: 90 };
+const LONG = { min: -180, max: 180 };
+
+const NEST_RANGES = {
+  total_num_eggs: EGGS,
+  current_num_eggs: EGGS,
+  depth_top_egg_h: CM,
+  depth_bottom_chamber_h: CM,
+  width_w: CM,
+  distance_to_sea_s: METRES,
+  tri_tl_distance: METRES,
+  tri_tr_distance: METRES,
+  gps_lat: LAT,
+  gps_long: LONG,
+  tri_tl_lat: LAT,
+  tri_tr_lat: LAT,
+  tri_tl_long: LONG,
+  tri_tr_long: LONG,
+};
+
+const EMERGENCE_RANGES = {
+  distance_to_sea_s: METRES,
+  gps_lat: LAT,
+  gps_long: LONG,
+};
+
+const TURTLE_RANGES = {
+  scl_max: MEASUREMENT,
+  scl_min: MEASUREMENT,
+  scw: MEASUREMENT,
+  ccl_max: MEASUREMENT,
+  ccl_min: MEASUREMENT,
+  ccw: MEASUREMENT,
+  tail_extension: MEASUREMENT,
+  vent_to_tail_tip: MEASUREMENT,
+  total_tail_length: MEASUREMENT,
+};
+
+// The excavation tallies are one count per stage per condition, exactly as they
+// are inserted below, so the two lists stay in step.
+const EXCAVATION_STAGES = [
+  "hatched", "non_viable", "eye_spot", "early", "middle", "late", "piped_dead",
+];
+const EXCAVATION_CONDITIONS = [
+  "count", "black_fungus_count", "green_bacteria_count", "pink_bacteria_count",
+];
+
+const NEST_EVENT_RANGES = {
+  tracks_to_sea: COUNT,
+  tracks_lost: COUNT,
+  total_eggs: EGGS,
+  helped_to_sea: COUNT,
+  eggs_reburied: EGGS,
+  piped_alive_count: COUNT,
+  alive_within: COUNT,
+  dead_within: COUNT,
+  alive_above: COUNT,
+  dead_above: COUNT,
+  original_depth_top_egg_h: CM,
+  original_depth_bottom_chamber_h: CM,
+  original_width_w: CM,
+  original_distance_to_sea_s: METRES,
+  original_gps_lat: LAT,
+  original_gps_long: LONG,
+  reburied_depth_top_egg_h: CM,
+  reburied_depth_bottom_chamber_h: CM,
+  reburied_width_w: CM,
+  reburied_distance_to_sea_s: METRES,
+  reburied_gps_lat: LAT,
+  reburied_gps_long: LONG,
+  ...Object.fromEntries(
+    EXCAVATION_STAGES.flatMap((stage) =>
+      EXCAVATION_CONDITIONS.map((condition) => [`${stage}_${condition}`, COUNT])
+    )
+  ),
+};
+
+// Absent and blank are left alone - "not measured" is a legitimate answer for
+// most of these, and the required-field checks are what decide that.
+const asNumber = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
+
+const outOfRange = (body, ranges) => {
+  for (const [field, { min, max }] of Object.entries(ranges)) {
+    const value = asNumber(body[field]);
+    if (value === null) continue;
+    if (!Number.isFinite(value) || value < min || value > max) {
+      return `${field} must be a number between ${min} and ${max}.`;
+    }
+  }
+  return null;
+};
+
+// Range plus the two things a nest cannot be regardless of range: more eggs left
+// than were ever laid, and a chamber floor above its ceiling.
+const invalidNest = (body) => {
+  const range = outOfRange(body, NEST_RANGES);
+  if (range) return range;
+
+  const total = asNumber(body.total_num_eggs);
+  const current = asNumber(body.current_num_eggs);
+  if (total !== null && current !== null && current > total) {
+    return "current_num_eggs cannot be greater than total_num_eggs.";
+  }
+
+  const top = asNumber(body.depth_top_egg_h);
+  const bottom = asNumber(body.depth_bottom_chamber_h);
+  if (top !== null && bottom !== null && bottom < top) {
+    return "depth_bottom_chamber_h cannot be shallower than depth_top_egg_h.";
+  }
+
+  return null;
+};
+
+// Roles allowed to write field records. Field Volunteers are included: they do
+// the bulk of the beach work and must be able to record what they find. A
+// Field Leader confirming volunteer submissions is a separate approval flow,
+// built later - until then a volunteer's record is stored like any other.
+// Destructive actions (deletes, archiving, the user directory, the timetable)
+// stay on the narrower COORDINATOR/LEADER guards.
+const RECORDERS = [COORDINATOR, LEADER, "Field Assistant", "Field Volunteer"];
+
 // Only these origins may call the API with credentials. Requests with no Origin
 // header (curl, server-to-server, health checks) still reach requireAuth, which
 // is what actually protects the data - CORS is a browser policy, not a lock.
@@ -177,7 +317,11 @@ app.post("/users/register", async (req, res) => {
 });
 
 // Get all users endpoint
-app.get("/users", async (req, res) => {
+//
+// The whole directory - every address, role and station - so it is limited to
+// the roles the sidebar shows User Management to (Sidebar.tsx). Anyone can
+// still read their own record through GET /users/:id.
+app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
   try {
     // Never `SELECT *` here: the row carries password_hash, and this response
     // is serialised straight to the client.
@@ -627,7 +771,7 @@ app.delete("/users/:id", async (req, res) => {
 // Turtles table
 //--------------------------------------------------------------
 // Create Turtle endpoint
-app.post("/turtles/create", async (req, res) => {
+app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
   try {
     let {
       name,
@@ -684,6 +828,11 @@ app.post("/turtles/create", async (req, res) => {
       return res.status(400).json({
         error: "Missing required fields."
       });
+    }
+
+    const rangeError = outOfRange(req.body, TURTLE_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const sql = `
@@ -867,7 +1016,7 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
 });
 
 // Update turtle tags + measurements + health condition endpoint
-app.put("/turtles/:id/update", async (req, res) => {
+app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -921,6 +1070,11 @@ app.put("/turtles/:id/update", async (req, res) => {
       return res.status(400).json({
         error: "health_condition and all measurement fields are required."
       });
+    }
+
+    const rangeError = outOfRange(req.body, TURTLE_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const sql = `
@@ -1253,7 +1407,7 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 // Then include tri_tl_img and/or tri_tr_img as base64 strings in your POST/PUT body.
 
 // Create Nest endpoint
-app.post("/nests/create", async (req, res) => {
+app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
   const client = await db.connect();
   try {
     const {
@@ -1296,6 +1450,11 @@ app.post("/nests/create", async (req, res) => {
       !beach
     ) {
       return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    const rangeError = invalidNest(req.body);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     // Validate status
@@ -1400,7 +1559,7 @@ app.post("/nests/create", async (req, res) => {
 });
 
 // Update Nest endpoint
-app.put("/nests/:id/update", async (req, res) => {
+app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1455,6 +1614,11 @@ app.put("/nests/:id/update", async (req, res) => {
       return res.status(400).json({
         error: "Missing required fields."
       });
+    }
+
+    const rangeError = invalidNest(req.body);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     // Validate status
@@ -1639,7 +1803,7 @@ app.get("/nests/:nest_code", async (req, res) => {
 // Turtle nest events
 //---------------------------------------------------------------
 // Create Turtle Nest Event endpoint
-app.post("/nest-events/create", async (req, res) => {
+app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
   try {
     const {
       event_type,
@@ -1715,6 +1879,11 @@ app.post("/nest-events/create", async (req, res) => {
 
     if (!event_type || !nest_code) {
       return res.status(400).json({ error: "event_type and nest_code are required." });
+    }
+
+    const rangeError = outOfRange(req.body, NEST_EVENT_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const nestResult = await db.query(
@@ -1823,7 +1992,7 @@ app.get("/nest-events/:nest_code", async (req, res) => {
 });
 
 // Update Nest Event endpoint
-app.put("/nest-events/:id", async (req, res) => {
+app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1891,6 +2060,11 @@ app.put("/nest-events/:id", async (req, res) => {
       return res.status(400).json({
         error: "Missing required fields: event_type, nest_id, and nest_code are mandatory."
       });
+    }
+
+    const rangeError = outOfRange(req.body, NEST_EVENT_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const sql = `
@@ -1962,7 +2136,7 @@ app.put("/nest-events/:id", async (req, res) => {
 //---------------------------------------------------------------
 
 // Create a new turtle emergence
-app.post("/emergences", async (req, res) => {
+app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { 
       distance_to_sea_s, 
@@ -1978,6 +2152,11 @@ app.post("/emergences", async (req, res) => {
 
     if (!event_date) {
       return res.status(400).json({ error: "event_date is required." });
+    }
+
+    const rangeError = outOfRange(req.body, EMERGENCE_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const sql = `
@@ -2059,10 +2238,15 @@ app.get("/emergences/:id", async (req, res) => {
 //
 // Only the fields a correction would touch. Everything COALESCEs, so a partial
 // body leaves the rest of the row alone.
-app.put("/emergences/:id", async (req, res) => {
+app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
     const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
+
+    const rangeError = outOfRange(req.body, EMERGENCE_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
 
     const result = await db.query(
       `UPDATE turtle_emergences
@@ -2272,6 +2456,7 @@ app.get("/timetable/week", async (req, res) => {
     const sql = `
       SELECT 
         t.assignment_id,
+        t.user_id,
         t.work_date,
         t.status,
         u.first_name,
@@ -2370,7 +2555,7 @@ app.get("/beaches", async (req, res) => {
 //-------------------------------------------------------------------
 
 // POST: Create a new morning survey record
-app.post("/morning-surveys", async (req, res) => {
+app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
   try {
     const {
       survey_date,
@@ -2429,7 +2614,7 @@ app.post("/morning-surveys", async (req, res) => {
 });
 
 // Link a nest to a survey
-app.post("/morning-surveys/:id/nests", async (req, res) => {
+app.post("/morning-surveys/:id/nests", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
     const { nest_id } = req.body;
@@ -2477,7 +2662,7 @@ app.post("/morning-surveys/:id/nests", async (req, res) => {
 });
 
 //Link an emergence to a survey
-app.post("/morning-surveys/:id/emergences", async (req, res) => {
+app.post("/morning-surveys/:id/emergences", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
     const { emergence_id } = req.body;
