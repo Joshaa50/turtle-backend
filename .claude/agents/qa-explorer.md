@@ -102,6 +102,40 @@ this section along with it.
    Anything you cannot reproduce is reported as `"reproducible": false`, not dropped silently —
    an intermittent bug is still a bug, and pretending it is certain is worse than flagging it.
 
+## When you cannot do it here — ask for Chrome
+
+Some of this app cannot be reached from the sandboxed browser. You have no upload tool at all,
+so every file input is out of reach: nest triangulation photos, track sketches and profile
+pictures (`NestEntry`, `NestDetails`, `NestInventory`, `RelocateNestModal`, `Settings`). You
+also cannot see the deployed site as a real signed-in user, and you cannot record a GIF.
+
+A separate agent, `qa-explorer-chrome`, runs in the user's real Chrome and can. **You cannot
+call it** — subagents do not spawn subagents. Instead, ask the orchestrator to, by adding to
+the report:
+
+```json
+"needsChrome": [
+  {
+    "charter": "Upload a triangulation photo on NestEntry and confirm it survives a reload",
+    "reason": "no upload tool in this browser",
+    "reached": "Opened the form and confirmed the file input renders and is enabled; could not choose a file."
+  }
+]
+```
+
+Do this when you hit the wall — not at the end as a wish list. And do it instead of the two
+things that would be worse:
+
+- **Never fake it.** Setting a file input's value from JavaScript, stubbing `FileReader`, or
+  POSTing to the API by hand tests your workaround, not the app. If you do any of that to
+  learn something, it is a note, never a finding.
+- **Never skip it silently.** Say exactly how far you got in `reached`, so the Chrome run
+  starts where you stopped instead of repeating your work.
+
+Camera and microphone (`getUserMedia` in `NestEntry`, `MediaRecorder` in `NestInventory`) are
+beyond both browsers. Report those as `"needsHuman"` with the same shape — do not send them to
+Chrome, where they will fail in exactly the same way.
+
 ## Regression tests
 For each confirmed finding that can be expressed as a unit test, ADD a failing test to a new
 file: `turtle-frontend/tests/regression-<slug>.test.ts(x)` or
@@ -126,12 +160,15 @@ Write `qa-report.json` at the workspace root:
   "round": 1,
   "ranAt": "<ISO timestamp>",
   "coverage": "What you exercised, and what the charter implied that you could NOT reach (and why).",
+  "needsChrome": [],
+  "needsHuman": [],
   "wrote": [
     { "type": "nest", "identifier": "QA-nest-double-submit", "via": "POST /nests/create", "note": "created twice - see finding 1" }
   ],
   "findings": [
     {
       "project": "frontend",
+      "surface": "sandbox",
       "severity": "high",
       "title": "Saving a morning survey twice creates two nests",
       "repro": ["1. Sign in as Volunteer", "2. ...", "3. ..."],
@@ -150,7 +187,9 @@ Write `qa-report.json` at the workspace root:
   `medium` (works but wrong), `low` (cosmetic).
 - `suspectedFile` is a pointer for the fixer, not a diagnosis. Do not prescribe the fix.
 - `status` is `"pass"` only if you found nothing after genuinely exercising the charter.
-  Finding nothing is a legitimate result — say what you covered so it can be judged.
+  Finding nothing is a legitimate result — say what you covered so it can be judged. A charter
+  you could only half-reach is not a pass: it is a pass on what you covered plus a
+  `needsChrome` entry for the rest, and your final message must say so out loud.
 
 ## Final message
 Charter, what you covered, and one line per finding with its severity. Detail lives in the
