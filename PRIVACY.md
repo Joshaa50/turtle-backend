@@ -40,11 +40,14 @@ for how Google handles that.
 - **Any signed-in team member, in any of the four roles**, can currently
   read the precise GPS coordinates and photos for every nest and emergence
   in the system, and every turtle record. **Role differences today govern
-  who can create, edit, and approve records — not who can read them.**
-  If your organization needs nest-location data restricted to specific
-  roles or specific team members (for example, limiting which volunteers
-  can see the exact coordinates of a nest they didn't log), that is not yet
-  built and should be discussed before a pilot with sensitive sites.
+  who can create, edit, and approve records — not who can read them.** This
+  is a deliberate non-priority for teams that mark and physically protect
+  nests in the field (a barrier makes the location obvious on the beach
+  anyway, so restricting it in the app adds friction without adding
+  secrecy). If your program instead relies on nest locations being kept
+  quiet — no physical marker, a beach with public access, a poaching risk
+  the team manages by not disclosing coordinates — read-access restriction
+  by role is not built yet and should be discussed before piloting.
 - **A Coordinator or Field Leader** additionally sees the full team
   directory (every account's name, email, role, station, and active status),
   and reviews Field Volunteers' submissions before they're marked confirmed.
@@ -62,12 +65,16 @@ directly with them if that matters for your use case.
 
 ## Why this matters for nest data specifically
 
-GPS coordinates for active nests are sensitive: poaching and egg theft are a
-real risk for sea turtle conservation programs, which is exactly why the
-public stats endpoint returns aggregates only and nothing location-specific.
-The gap described above — any authenticated role can read any nest's exact
-coordinates — is the main thing worth resolving, or explicitly accepting the
-risk of, before running this with a real, active nesting season.
+GPS coordinates for active nests can be sensitive: poaching and egg theft are
+a real risk for some sea turtle conservation programs, which is exactly why
+the public stats endpoint returns aggregates only and nothing
+location-specific, regardless of how any individual program protects its
+nests on the ground. Whether the in-app role-visibility gap above matters
+depends on how your program actually protects a nest once it's found — a
+team that marks and physically barriers each nest, so the location is
+already visible on the beach, has no secrecy for the app to preserve or leak.
+A team that protects nests by keeping their coordinates undisclosed should
+treat that gap as a real one to resolve before piloting.
 
 ## Retention and deletion
 
