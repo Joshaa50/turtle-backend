@@ -289,15 +289,41 @@ app.get("/test", (req, res) => {
   res.json({ message: "Backend is working!" });
 });
 
-// Users table 
+// Users table
 //--------------------------------------------------------------
+// Records when someone agreed to the data notice shown at sign-up, so there is
+// a record of consent independent of whatever the client claims. Additive and
+// idempotent, same pattern as turtles.is_archived - safe on every boot, and
+// skipped when the module is only imported for tests.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_notice_accepted_at TIMESTAMPTZ;"
+      );
+      console.log("users.privacy_notice_accepted_at is present.");
+    } catch (err) {
+      console.error("Could not ensure users.privacy_notice_accepted_at:", err.message);
+    }
+  })();
+}
+
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
-    const { first_name, last_name, email, password, role, station, is_password_reset_needed } = req.body;
+    const { first_name, last_name, email, password, role, station, is_password_reset_needed, privacy_notice_accepted } = req.body;
 
     if (!first_name || !last_name || !email || !password || !station) {
       return res.status(400).json({ error: "Missing required fields (including station)." });
+    }
+
+    // A checkbox the client enforces is only a UI nicety - what actually
+    // proves consent is the server refusing to create the account without it,
+    // and the timestamp below is the record of when that happened.
+    if (privacy_notice_accepted !== true) {
+      return res.status(400).json({
+        error: "You must agree to the data notice to create an account."
+      });
     }
 
     const userRole = role || "volunteer";
@@ -305,9 +331,9 @@ app.post("/users/register", async (req, res) => {
 
     const sql = `
       INSERT INTO users
-        (first_name, last_name, email, password_hash, role, station, is_password_reset_needed)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, first_name, last_name, email, role, station, is_password_reset_needed, created_at;
+        (first_name, last_name, email, password_hash, role, station, is_password_reset_needed, privacy_notice_accepted_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      RETURNING id, first_name, last_name, email, role, station, is_password_reset_needed, privacy_notice_accepted_at, created_at;
     `;
 
     const result = await db.query(sql, [
