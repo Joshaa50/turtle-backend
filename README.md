@@ -80,6 +80,11 @@ silently come back.
 - **No rate limiting.** Fine for a small pilot team; add one before any
   public-facing use.
 
+## License
+
+Proprietary — see [LICENSE](./LICENSE). Available to view and evaluate;
+contact joshaa50@gmail.com to discuss use or piloting.
+
 ## Status
 
 Backend for an active pilot-stage app. Role guards and numeric validation
