@@ -1310,6 +1310,14 @@ app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) =>
       [id]
     );
 
+    // A deleted record leaves nothing for its review row to point at, so it
+    // goes with it - otherwise a Field Leader's decided queue accumulates
+    // rows for records that no longer exist.
+    await client.query(
+      `DELETE FROM record_reviews WHERE record_type = 'turtle' AND record_id = $1;`,
+      [id]
+    );
+
     const turtle = await client.query(
       `DELETE FROM turtles WHERE id = $1 RETURNING *;`,
       [id]
@@ -2411,6 +2419,12 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 
     await client.query(`DELETE FROM morning_survey_nests WHERE nest_id = $1;`, [id]);
 
+    // See the matching comment in DELETE /turtles/:id.
+    await client.query(
+      `DELETE FROM record_reviews WHERE record_type = 'nest' AND record_id = $1;`,
+      [id]
+    );
+
     const deleted = await client.query(
       `DELETE FROM turtle_nests WHERE id = $1 RETURNING id, nest_code, beach;`,
       [id]
@@ -2461,6 +2475,12 @@ app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"
 
     await client.query(
       `DELETE FROM morning_survey_emergences WHERE emergence_id = $1;`,
+      [id]
+    );
+
+    // See the matching comment in DELETE /turtles/:id.
+    await client.query(
+      `DELETE FROM record_reviews WHERE record_type = 'emergence' AND record_id = $1;`,
       [id]
     );
 
@@ -3056,6 +3076,28 @@ const decideReview = (decision) => async (req, res) => {
 };
 
 app.post("/reviews/:id/approve", requireRole(...REVIEWERS), decideReview("approved"));
+
+// Manual cleanup for a review row a delete route's own cascade didn't catch -
+// chiefly ones left behind before that cascade existed. Deleting the review
+// never touches the record it refers to; it only removes the queue entry.
+app.delete("/reviews/:id", requireRole(...REVIEWERS), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(
+      `DELETE FROM record_reviews WHERE id = $1 RETURNING id;`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Review not found." });
+    }
+    res.json({ message: "Review removed." });
+  } catch (err) {
+    console.error("Delete review error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+
 app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
 
 app.post("/ai/nest-query", async (req, res) => {

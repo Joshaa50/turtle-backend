@@ -196,3 +196,97 @@ describe('deciding on a submission', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('cleaning up orphaned review rows', () => {
+  const wroteReviewCascade = (spy, type) =>
+    spy.mock.calls.some(
+      ([sql]) =>
+        String(sql).includes('DELETE FROM record_reviews') &&
+        String(sql).includes(`record_type = '${type}'`),
+    );
+
+  it('removes the review row when the turtle it points at is archived and deleted', async () => {
+    clientQuery.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT is_archived FROM turtles')) {
+        return Promise.resolve({ rows: [{ is_archived: true }] });
+      }
+      if (text.includes('DELETE FROM turtles')) return Promise.resolve({ rows: [{ id: 42 }] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asLeader(request(app).delete('/turtles/42'));
+
+    expect(res.status).toBe(200);
+    expect(wroteReviewCascade(clientQuery, 'turtle')).toBe(true);
+  });
+
+  it('removes the review row when a nest is deleted', async () => {
+    clientQuery.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT id, nest_code FROM turtle_nests')) {
+        return Promise.resolve({ rows: [{ id: 55, nest_code: 'LG2-9' }] });
+      }
+      return Promise.resolve({ rows: [{ id: 55 }] });
+    });
+
+    const res = await asLeader(request(app).delete('/nests/55'));
+
+    expect(res.status).toBe(200);
+    expect(wroteReviewCascade(clientQuery, 'nest')).toBe(true);
+  });
+
+  it('removes the review row when an emergence is deleted', async () => {
+    clientQuery.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT nest_code FROM turtle_nests WHERE emergence_id')) {
+        return Promise.resolve({ rows: [] }); // not attached to a nest
+      }
+      return Promise.resolve({ rows: [{ id: 77 }] });
+    });
+
+    const res = await asLeader(request(app).delete('/emergences/77'));
+
+    expect(res.status).toBe(200);
+    expect(wroteReviewCascade(clientQuery, 'emergence')).toBe(true);
+  });
+});
+
+describe('manually dismissing a review row', () => {
+  it('lets a Field Leader remove one', async () => {
+    query.mockResolvedValue({ rows: [{ id: 1 }] });
+
+    const res = await asLeader(request(app).delete('/reviews/1'));
+
+    expect(res.status).toBe(200);
+  });
+
+  it('refuses a Field Volunteer', async () => {
+    const res = await asVolunteer(request(app).delete('/reviews/1'));
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a Field Assistant', async () => {
+    const res = await asAssistant(request(app).delete('/reviews/1'));
+    expect(res.status).toBe(403);
+  });
+
+  it('reports 404 for a row that does not exist', async () => {
+    query.mockResolvedValue({ rows: [] });
+
+    const res = await asLeader(request(app).delete('/reviews/999'));
+
+    expect(res.status).toBe(404);
+  });
+
+  it('does not touch the underlying record', async () => {
+    query.mockResolvedValue({ rows: [{ id: 1 }] });
+
+    await asLeader(request(app).delete('/reviews/1'));
+
+    expect(query).not.toHaveBeenCalledWith(
+      expect.stringMatching(/DELETE FROM (turtle_nests|turtles|turtle_emergences)/),
+      expect.anything(),
+    );
+  });
+});
