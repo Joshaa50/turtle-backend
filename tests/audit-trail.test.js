@@ -18,6 +18,19 @@ const auditInsert = () =>
   query.mock.calls.find(([sql]) => /INSERT INTO record_audit/i.test(sql));
 
 describe('audit trail', () => {
+  // This shipped broken once: the boot migration sat above `const db`, so it
+  // ran in the pool's temporal dead zone, threw into its own catch, logged a
+  // line nobody read, and the table was never created. Every write then
+  // failed silently and every read 500'd. Source order is the only thing that
+  // prevents it, so it is worth asserting.
+  it('creates record_audit only after the pool it uses exists', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+    expect(src.indexOf('const db = new Pool')).toBeGreaterThan(-1);
+    expect(src.indexOf('CREATE TABLE IF NOT EXISTS record_audit'))
+      .toBeGreaterThan(src.indexOf('const db = new Pool'));
+  });
+
   describe('reading it', () => {
     it('is closed to a volunteer — who touched a record is staff information', async () => {
       const res = await request(app).get('/audit/nest/4').set('Authorization', `Bearer ${tokenFor('Field Volunteer')}`);

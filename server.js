@@ -282,35 +282,7 @@ const recordAudit = async (executor, { recordType, recordId, action, req, summar
   }
 };
 
-// Same idempotent boot-migration pattern as record_reviews: safe on every
-// boot, skipped when the module is only imported for tests.
-if (require.main === module) {
-  (async () => {
-    try {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS record_audit (
-          id           SERIAL PRIMARY KEY,
-          record_type  TEXT        NOT NULL,
-          record_id    INTEGER     NOT NULL,
-          action       TEXT        NOT NULL,
-          actor_id     INTEGER,
-          actor_email  TEXT,
-          actor_role   TEXT,
-          summary      TEXT,
-          occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-      `);
-      // The only query this table serves is "history of one record, newest
-      // first", and it grows forever, so it is worth an index from the start.
-      await db.query(
-        "CREATE INDEX IF NOT EXISTS record_audit_lookup ON record_audit (record_type, record_id, occurred_at DESC);"
-      );
-      console.log("record_audit is present.");
-    } catch (err) {
-      console.error("Could not ensure record_audit:", err.message);
-    }
-  })();
-}
+
 
 // The record types that can carry a review. Keyed by the table the id belongs
 // to, so a review row can be resolved back to the thing it describes.
@@ -384,6 +356,36 @@ if (require.main === module) {
       console.log("users.privacy_notice_accepted_at is present.");
     } catch (err) {
       console.error("Could not ensure users.privacy_notice_accepted_at:", err.message);
+    }
+  })();
+}
+
+// Same idempotent boot-migration pattern as record_reviews: safe on every
+// boot, skipped when the module is only imported for tests.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS record_audit (
+          id           SERIAL PRIMARY KEY,
+          record_type  TEXT        NOT NULL,
+          record_id    INTEGER     NOT NULL,
+          action       TEXT        NOT NULL,
+          actor_id     INTEGER,
+          actor_email  TEXT,
+          actor_role   TEXT,
+          summary      TEXT,
+          occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      // The only query this table serves is "history of one record, newest
+      // first", and it grows forever, so it is worth an index from the start.
+      await db.query(
+        "CREATE INDEX IF NOT EXISTS record_audit_lookup ON record_audit (record_type, record_id, occurred_at DESC);"
+      );
+      console.log("record_audit is present.");
+    } catch (err) {
+      console.error("Could not ensure record_audit:", err.message);
     }
   })();
 }
