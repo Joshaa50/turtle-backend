@@ -4,6 +4,7 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("node:crypto");
 
 const app = express();
 
@@ -914,6 +915,193 @@ app.delete("/users/:id", async (req, res) => {
     if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("Delete account error:", err);
     res.status(500).json({ error: "Server error." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Subject access and erasure
+//--------------------------------------------------------------
+// PRIVACY.md said plainly that neither existed. A conservation project holds
+// volunteers' names and emails, so both are obligations rather than features.
+//
+// The shape of erasure here is the whole design decision: a nest record is
+// about a turtle, not about the person who wrote it down, and destroying a
+// season of fieldwork because a volunteer left would be a conservation loss
+// with no privacy gain. So erasure removes the identifiers and keeps the
+// observations - which is what the scientific-research exemption exists for.
+// What goes, goes completely; what stays, stays honestly labelled.
+
+// The address left on an erased account. Unique per account so the column's
+// uniqueness constraint holds, and on the reserved invalid TLD so it can
+// never route anywhere if something later tries to mail it.
+const erasedEmailFor = (id) => `erased-${id}@removed.invalid`;
+const ERASED_NAME = "Removed";
+
+app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
+  try {
+    const account = await db.query(
+      `SELECT id, first_name, last_name, email, role, station, is_active,
+              is_email_verified, privacy_notice_accepted_at, created_at
+       FROM users WHERE id = $1 LIMIT 1;`,
+      [id]
+    );
+    if (account.rows.length === 0) return res.status(404).json({ error: "User not found." });
+    const person = account.rows[0];
+    const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
+
+    // Everything that names this person, not merely everything keyed to their
+    // id: the observer columns hold a typed name, so an export keyed only on
+    // user_id would quietly miss the records they are actually named on.
+    const [shifts, submitted, reviewed, audit, turtleEvents, nestEvents] = await Promise.all([
+      db.query(`SELECT * FROM Timetable WHERE user_id = $1 ORDER BY work_date DESC;`, [id]),
+      db.query(`SELECT * FROM record_reviews WHERE submitted_by = $1 ORDER BY submitted_at DESC;`, [id]),
+      db.query(`SELECT * FROM record_reviews WHERE reviewed_by = $1 ORDER BY submitted_at DESC;`, [id]),
+      db.query(`SELECT * FROM record_audit WHERE actor_id = $1 ORDER BY occurred_at DESC;`, [id]),
+      fullName
+        ? db.query(`SELECT id, event_date, event_type, location, observer FROM turtle_survey_events WHERE observer = $1;`, [fullName])
+        : Promise.resolve({ rows: [] }),
+      fullName
+        ? db.query(`SELECT id, event_type, observer FROM turtle_nest_events WHERE observer = $1;`, [fullName])
+        : Promise.resolve({ rows: [] }),
+    ]);
+
+    res.json({
+      exported_at: new Date().toISOString(),
+      exported_by: req.user?.email ?? null,
+      account: person,
+      shift_assignments: shifts.rows,
+      records_submitted_for_review: submitted.rows,
+      reviews_they_decided: reviewed.rows,
+      actions_in_the_audit_trail: audit.rows,
+      // Named, not owned. These are turtle records that happen to carry this
+      // person's name as the observer.
+      fieldwork_they_are_named_on: {
+        turtle_encounters: turtleEvents.rows,
+        nest_events: nestEvents.rows,
+      },
+      note:
+        "Field records (nests, surveys, turtle encounters) are observations about animals, not personal data, and are retained. This export lists the ones this person is named on.",
+    });
+  } catch (err) {
+    console.error("Data export error:", err);
+    res.status(500).json({ error: "Server error while building the export." });
+  }
+});
+
+app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
+  // Typing the address is the confirmation, the way deleting your own account
+  // asks for a password. This cannot be undone and it is easy to run against
+  // the wrong row in a list of forty-odd people.
+  const { confirm_email } = req.body || {};
+  if (!confirm_email) {
+    return res.status(400).json({ error: "Confirm by sending the account's email address as confirm_email." });
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query("BEGIN");
+
+    const found = await client.query(
+      `SELECT id, first_name, last_name, email, role FROM users WHERE id = $1 LIMIT 1 FOR UPDATE;`,
+      [id]
+    );
+    if (found.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const person = found.rows[0];
+    if (String(confirm_email).trim().toLowerCase() !== String(person.email).trim().toLowerCase()) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "That email does not match the account you are erasing." });
+    }
+
+    // Losing the last coordinator would leave nobody able to approve accounts
+    // or run an erasure again - the same reasoning that guards self-deletion.
+    if (person.role === COORDINATOR) {
+      const others = await client.query(
+        `SELECT COUNT(*)::int AS n FROM users WHERE role = $1 AND is_active = true AND id <> $2;`,
+        [COORDINATOR, id]
+      );
+      if (others.rows[0].n === 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error: "This is the last active coordinator. Give somebody else that role first.",
+        });
+      }
+    }
+
+    const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
+
+    // A password nobody holds: the row has to stay for the records that
+    // reference it, but it must stop being an account anyone can sign into.
+    const unusable = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
+
+    await client.query(
+      `UPDATE users
+       SET first_name = $1, last_name = '', email = $2, profile_picture = NULL,
+           station = NULL, password_hash = $3, is_active = false, is_email_verified = false
+       WHERE id = $4;`,
+      [ERASED_NAME, erasedEmailFor(id), unusable, id]
+    );
+
+    // A rota is about who is working, so an erased person's shifts have no
+    // reason to persist. Field records do, which is why only this one is a
+    // delete.
+    const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1 RETURNING id;`, [id]);
+
+    // The trail keeps its shape - something was created, by a coordinator, on
+    // a date - without keeping the address that identifies who.
+    const audit = await client.query(
+      `UPDATE record_audit SET actor_email = NULL WHERE actor_id = $1 RETURNING id;`,
+      [id]
+    );
+
+    // The typed observer name is the person's name sitting in a field record.
+    // Replaced rather than blanked, so the record still says somebody observed
+    // it and does not read as though the observer was never recorded.
+    let observerRows = 0;
+    if (fullName) {
+      for (const table of ["turtle_survey_events", "turtle_nest_events"]) {
+        const r = await client.query(
+          `UPDATE ${table} SET observer = $1 WHERE observer = $2 RETURNING id;`,
+          [ERASED_NAME, fullName]
+        );
+        observerRows += r.rowCount;
+      }
+    }
+
+    await recordAudit(client, {
+      recordType: "user",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: "Personal data erased at request; field records retained",
+    });
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Personal data erased. Field records were retained.",
+      erased: {
+        account: Number(id),
+        shift_assignments_deleted: shifts.rowCount,
+        audit_entries_de_identified: audit.rowCount,
+        field_records_observer_replaced: observerRows,
+      },
+    });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("Erase user error:", err);
+    res.status(500).json({ error: "Server error while erasing. Nothing was changed." });
   } finally {
     if (client) client.release();
   }

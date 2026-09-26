@@ -78,12 +78,35 @@ treat that gap as a real one to resolve before piloting.
 
 ## Retention and deletion
 
-There is currently no automatic data retention limit or self-service export
-or deletion for an individual's account or the records they created. A
-Coordinator can deactivate an account or delete/archive records manually
-through the app. If your organization has a specific retention or
-right-to-deletion requirement, raise it before piloting — it is a
-straightforward addition but is not built yet.
+There is still no automatic retention limit — records are kept until somebody
+removes them. Two things a person can ask for are now built, and a Project
+Coordinator performs both:
+
+**A copy of what is held about them.** Everything the app stores that names
+them: their account, their shift assignments, the records they submitted for
+review, reviews they decided, their entries in the audit trail, and the field
+records that carry their name as observer. It never includes a password.
+
+**Erasure.** This removes the identifying details and keeps the observations.
+Their name, email, profile picture and station are replaced, the account is
+deactivated and its password made unusable, their future shifts are deleted,
+their email is stripped from the audit trail, and their name is replaced
+wherever it appears as an observer on a record.
+
+The nests, surveys and turtle encounters themselves are **kept**. A nest
+record describes an animal and a beach, not the person who wrote it down, and
+deleting a season of fieldwork because a volunteer left would be a
+conservation loss with no privacy gain — this is the reasoning behind the
+research exemption in most data-protection law, and it is worth confirming it
+fits your own obligations. What is removed is removed completely; what is kept
+is labelled honestly as having had its observer removed, rather than left
+looking as though nobody recorded it.
+
+Erasure cannot be undone, so it asks the coordinator to type the account's
+email address to confirm, and it refuses to erase the last active coordinator.
+
+If your organization needs a retention limit, or self-service rather than
+coordinator-performed requests, raise it before piloting.
 
 ## Questions
 
