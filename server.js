@@ -311,7 +311,7 @@ if (require.main === module) {
 // Register endpoint
 app.post("/users/register", async (req, res) => {
   try {
-    const { first_name, last_name, email, password, role, station, is_password_reset_needed, privacy_notice_accepted } = req.body;
+    const { first_name, last_name, email, password, station, is_password_reset_needed, privacy_notice_accepted } = req.body;
 
     if (!first_name || !last_name || !email || !password || !station) {
       return res.status(400).json({ error: "Missing required fields (including station)." });
@@ -326,7 +326,19 @@ app.post("/users/register", async (req, res) => {
       });
     }
 
-    const userRole = role || "volunteer";
+    // Self-registration cannot choose its own privileges. The old code took
+    // `role` straight from the request, so anyone could register as a Project
+    // Coordinator and the only thing standing between them and full access was
+    // an approver noticing the requested role before clicking approve.
+    //
+    // Everyone starts as a Field Volunteer - the least this app grants - and a
+    // coordinator or leader raises it afterwards through PATCH /users/:id,
+    // which is already privilege-checked. What the applicant asked for is kept
+    // as a note for whoever reviews them, not as a grant.
+    // Persisting what they asked for would need a new column; until then the
+    // sign-up form simply stops offering the choice, so nothing is discarded
+    // silently behind the applicant's back.
+    const userRole = VOLUNTEER;
     const password_hash = await bcrypt.hash(password, 10);
 
     const sql = `
