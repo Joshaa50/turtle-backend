@@ -104,6 +104,27 @@ const run = async () => {
   const needEncounters = turtles.filter((t) => Number(t.sighting_count || 0) === 0 && !t.is_archived);
   console.log(`  ${turtles.length} turtles, ${needEncounters.length} with no encounter on record`);
 
+  // Growth and remigration both need sightings in more than one season, and
+  // every encounter on this database is from 2026 - so the analytics correctly
+  // report that they cannot be calculated, and the feature demos as absent.
+  // A prior-season encounter gives them something real to work from.
+  const seasonsFor = async (t) => {
+    try {
+      const r = await fetch(`${API}/turtles/${t.id}/survey_events`, { headers: cAuth });
+      const events = (await r.json()).events || [];
+      return new Set(events.map((e) => new Date(e.event_date).getUTCFullYear()));
+    } catch {
+      return new Set();
+    }
+  };
+
+  const needPriorSeason = [];
+  for (const t of turtles.filter((x) => !x.is_archived && Number(x.sighting_count || 0) > 0)) {
+    const seen = await seasonsFor(t);
+    if (seen.size < 2) needPriorSeason.push({ turtle: t, seasons: seen });
+  }
+  console.log(`  ${needPriorSeason.length} seen in only one season`);
+
   const BEACHES = ['Loggos 2', 'Xi', 'Vatsa', 'Agios Ioannis', 'Megas Lakkos'];
   const OBSERVERS = ['Elena Papadaki', 'Nikos Floros', 'Sofia Manthou'];
 
@@ -111,6 +132,11 @@ const run = async () => {
   // centimetres - an animal that gained 4cm between sightings would be flagged
   // by the auditor, and rightly.
   const GROWTH_CM = 0.4;
+
+  // Two seasons back, so remigration comes out at the 2 years a Mediterranean
+  // loggerhead actually shows rather than the 1 that a single-year gap would
+  // imply, and the growth span is long enough to report a rate at all.
+  const PRIOR_SEASON_GAP = 2;
 
   // Every morphometric is required by the endpoint, so an encounter carries
   // the full set rather than the two or three that happen to be interesting.
@@ -141,13 +167,29 @@ const run = async () => {
 
   let encounterPlan = [];
   for (const [i, t] of needEncounters.entries()) {
-    const first = addDays(new Date(), -(120 + (i * 7) % 60));  // last season
-    const second = addDays(new Date(), -(20 + (i * 5) % 40));  // this one
+    const first = addDays(new Date(), -(120 + (i * 7) % 60));  // earlier this season
+    const second = addDays(new Date(), -(20 + (i * 5) % 40));  // later this season
 
     encounterPlan.push(
       { turtle: t, date: iso(first),  size: sizeAt(t, -GROWTH_CM), type: 'Nesting', beach: BEACHES[i % BEACHES.length] },
       { turtle: t, date: iso(second), size: sizeAt(t, 0),          type: 'Nesting', beach: BEACHES[(i + 2) % BEACHES.length] },
     );
+  }
+
+  // One encounter two seasons back for anyone only ever seen in one. Dated in
+  // June, inside the nesting season rather than on whatever day this runs, and
+  // measured two years of growth smaller so the rate that comes out is the
+  // millimetres-a-year a mature female actually puts on.
+  for (const [i, { turtle: t }] of needPriorSeason.entries()) {
+    const priorYear = new Date().getUTCFullYear() - PRIOR_SEASON_GAP;
+    const day = 8 + (i * 3) % 20;
+    encounterPlan.push({
+      turtle: t,
+      date: `${priorYear}-06-${String(day).padStart(2, '0')}`,
+      size: sizeAt(t, -GROWTH_CM * PRIOR_SEASON_GAP),
+      type: 'Nesting',
+      beach: BEACHES[(i + 1) % BEACHES.length],
+    });
   }
 
   // What POST /turtle_survey_events/create insists on. Checked here so a
@@ -192,7 +234,7 @@ const run = async () => {
     console.log(res.ok ? `  OK   ${desc}` : `  FAIL ${desc} — ${res.status} ${await res.text()}`);
   }
 
-  if (!CONFIRM && encounterPlan.length === 0) console.log('  nothing to add — every turtle already has encounters');
+  if (encounterPlan.length === 0) console.log('  nothing to add — every turtle has encounters across two seasons');
 
   // ---- Time table ---------------------------------------------------------
   console.log(`\n— Time table (week of ${iso(WEEK_START)}) —`);
