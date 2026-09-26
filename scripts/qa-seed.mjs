@@ -62,10 +62,23 @@ const seasonDate = () => {
 
 // Jitter a real beach's known position by a few hundred metres so nests on one
 // beach cluster the way they do in life, without landing on top of each other.
+// (Within ~100 m, not ~300: a nest more than about 200 m from its beach is exactly
+// what the app now flags, so seeded nests must not trip it.)
 const nearby = (lat, lon) => ({
-  lat: round(lat + rand(-0.0025, 0.0025), 7),
-  lon: round(lon + rand(-0.0025, 0.0025), 7),
+  lat: round(lat + rand(-0.0009, 0.0009), 7),
+  lon: round(lon + rand(-0.0009, 0.0009), 7),
 });
+
+// A point `metres` from (lat, lon) along `bearingDeg`. Triangulation points are
+// placed with this so the coordinates agree with the distance written beside them
+// - jittering them independently gave points 140-290 m from a nest that claimed to
+// be 4-12 m away.
+const offsetMetres = (lat, lon, metres, bearingDeg) => {
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = (metres * Math.cos(rad(bearingDeg))) / 111320;
+  const dLon = (metres * Math.sin(rad(bearingDeg))) / (111320 * Math.cos(rad(lat)));
+  return { lat: round(lat + dLat, 7), lon: round(lon + dLon, 7) };
+};
 
 const makeTurtle = () => {
   const species = Math.random() < 0.85 ? 'Caretta caretta' : 'Chelonia mydas';
@@ -98,7 +111,10 @@ const makeNest = (beach, seq, coords) => {
   const bottom = round(top + rand(18, 30));
   const relocated = Math.random() < 0.15;
   const p = nearby(coords.lat, coords.lon);
-  const t1 = nearby(p.lat, p.lon), t2 = nearby(p.lat, p.lon);
+  const d1 = round(rand(4, 14)), d2 = round(rand(4, 14));
+  const bearing = rand(0, 360);
+  const t1 = offsetMetres(p.lat, p.lon, d1, bearing);
+  const t2 = offsetMetres(p.lat, p.lon, d2, (bearing + rand(60, 120)) % 360);
   return {
     nest_code: `${beach.code}-${seq}${relocated ? 'R' : ''}`,
     beach: beach.name,
@@ -110,8 +126,8 @@ const makeNest = (beach, seq, coords) => {
     depth_top_egg_h: top, depth_bottom_chamber_h: bottom,
     width_w: round(inside(NEST.width, 0.3, 0.7)),
     status, relocated,
-    tri_tl_desc: pick(LANDMARKS), tri_tl_lat: t1.lat, tri_tl_long: t1.lon, tri_tl_distance: round(rand(4, 14)),
-    tri_tr_desc: pick(LANDMARKS), tri_tr_lat: t2.lat, tri_tr_long: t2.lon, tri_tr_distance: round(rand(4, 14)),
+    tri_tl_desc: pick(LANDMARKS), tri_tl_lat: t1.lat, tri_tl_long: t1.lon, tri_tl_distance: d1,
+    tri_tr_desc: pick(LANDMARKS), tri_tr_lat: t2.lat, tri_tr_long: t2.lon, tri_tr_distance: d2,
     notes: null,
   };
 };

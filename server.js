@@ -219,6 +219,78 @@ const invalidNest = (body) => {
   return null;
 };
 
+// A nest cannot have produced more hatchlings than it had eggs. Checked against
+// the clutch the nest already carries, or - for the first excavation, which is
+// what establishes the clutch - the egg count in the event itself. Emergence
+// logs add up across nights, so the running total is compared, not one night.
+const isExcavationType = (t) => String(t || "").toUpperCase().includes("INVENTORY");
+const isEmergenceType = (t) => ["EMERGENCE", "HATCHING"].includes(String(t || "").toUpperCase());
+
+const hatchlingsExceedClutch = (body, nestTotalEggs, emergedElsewhere) => {
+  const clutch = asNumber(nestTotalEggs) > 0 ? asNumber(nestTotalEggs) : asNumber(body.total_eggs);
+  if (!(clutch > 0)) return null;
+
+  if (isExcavationType(body.event_type)) {
+    const hatched = asNumber(body.hatched_count) || 0;
+    if (hatched > clutch) {
+      return `hatched_count (${hatched}) cannot be more than the ${clutch} eggs in this clutch.`;
+    }
+  } else if (isEmergenceType(body.event_type)) {
+    const total =
+      (Number(emergedElsewhere) || 0) +
+      (asNumber(body.tracks_to_sea) || 0) +
+      (asNumber(body.tracks_lost) || 0);
+    if (total > clutch) {
+      return `Hatchling tracks would total ${total}, more than the ${clutch} eggs in this clutch.`;
+    }
+  }
+  return null;
+};
+
+// Sum of hatchlings already logged from emergences on this nest, optionally
+// leaving one event out (the one being edited).
+const EMERGED_SO_FAR_SQL = `
+  (SELECT COALESCE(SUM(COALESCE(e.tracks_to_sea, 0) + COALESCE(e.tracks_lost, 0)), 0)
+   FROM turtle_nest_events e
+   WHERE e.nest_id = n.id AND e.event_type IN ('EMERGENCE', 'HATCHING')`;
+
+// One line saying what a save actually changed on a nest. Only the fields that
+// matter to a nest's story are compared - status, relocation, clutch, beach,
+// archiving - so a routine save does not fill the history with noise.
+const describeNestChanges = (prev, next) => {
+  const out = { text: `Nest ${next?.nest_code ?? ""} saved`.trim(), archived: false, restored: false };
+  if (!prev || !next) return out;
+
+  const parts = [];
+  if (prev.status !== next.status) parts.push(`Status ${prev.status} → ${next.status}`);
+  if (!prev.relocated && next.relocated) parts.push("Relocated");
+  if (prev.beach !== next.beach) parts.push(`Beach ${prev.beach} → ${next.beach}`);
+  if (String(prev.total_num_eggs ?? "") !== String(next.total_num_eggs ?? "")) {
+    parts.push(`Clutch ${prev.total_num_eggs ?? "unset"} → ${next.total_num_eggs ?? "unset"} eggs`);
+  }
+  if (!prev.is_archived && next.is_archived) { parts.push("Archived"); out.archived = true; }
+  if (prev.is_archived && !next.is_archived) { parts.push("Restored from archive"); out.restored = true; }
+  if (prev.nest_code !== next.nest_code) parts.push(`Code ${prev.nest_code} → ${next.nest_code}`);
+
+  out.text = parts.length > 0 ? parts.join("; ") : `Nest ${next.nest_code} details edited`;
+  return out;
+};
+
+const describeNestEvent = (e) => {
+  if (!e) return null;
+  const type = String(e.event_type || "");
+  if (isExcavationType(type)) {
+    const label = type === "PARTIAL_INVENTORY" ? "Partial inventory" : "Inventory";
+    return `${label} recorded: ${e.hatched_count ?? 0} hatched of ${e.total_eggs ?? "unknown"} eggs`;
+  }
+  if (isEmergenceType(type)) {
+    const n = (Number(e.tracks_to_sea) || 0) + (Number(e.tracks_lost) || 0);
+    return `Emergence logged: ${n} hatchling track${n === 1 ? "" : "s"}`;
+  }
+  if (type === "TOP_EGG") return "Top egg check recorded";
+  return type || null;
+};
+
 // Roles allowed to write field records. Field Volunteers are included: they do
 // the bulk of the beach work and must be able to record what they find. A
 // Field Leader confirming volunteer submissions is a separate approval flow,
@@ -388,6 +460,22 @@ if (require.main === module) {
       console.log("record_audit is present.");
     } catch (err) {
       console.error("Could not ensure record_audit:", err.message);
+    }
+  })();
+}
+
+// A beach's reference point, so a nest pinned nowhere near its beach can be
+// flagged. Additive and nullable - a beach without one is simply not checked -
+// and idempotent, same pattern as the migrations above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query("ALTER TABLE beaches ADD COLUMN IF NOT EXISTS gps_lat NUMERIC;");
+      await db.query("ALTER TABLE beaches ADD COLUMN IF NOT EXISTS gps_long NUMERIC;");
+      await db.query("ALTER TABLE beaches ADD COLUMN IF NOT EXISTS radius_m INTEGER;");
+      console.log("beaches.gps_lat / gps_long / radius_m are present.");
+    } catch (err) {
+      console.error("Could not ensure beaches coordinates:", err.message);
     }
   })();
 }
@@ -758,6 +846,32 @@ app.patch("/users/:id", async (req, res) => {
   // leader cannot promote themselves past their own ceiling.
   if (updates.role === COORDINATOR && req.user.role !== COORDINATOR) {
     return res.status(403).json({ error: "Only a project coordinator can assign that role." });
+  }
+
+  // Not a column - it only exists to prove the caller knows the password they
+  // are replacing, so it must never reach the SET clause or the allowlist check.
+  const currentPassword = updates.current_password;
+  delete updates.current_password;
+
+  // Someone changing their OWN password has to prove they know the current one,
+  // otherwise a walk-up on an unlocked, signed-in phone can lock the owner out.
+  // A coordinator or leader resetting somebody ELSE's password is the recovery
+  // path for exactly the person who has forgotten theirs, so it is not asked.
+  if (updates.password && isSelf) {
+    if (typeof currentPassword !== "string" || currentPassword === "") {
+      return res.status(400).json({ error: "Enter your current password to set a new one." });
+    }
+    try {
+      const existing = await db.query("SELECT password_hash FROM users WHERE id = $1 LIMIT 1;", [userId]);
+      const hash = existing.rows[0]?.password_hash;
+      const matches = hash ? await bcrypt.compare(currentPassword, hash) : false;
+      if (!matches) {
+        return res.status(403).json({ error: "Your current password is incorrect." });
+      }
+    } catch (err) {
+      console.error("Password change verification error:", err);
+      return res.status(500).json({ error: "Server error." });
+    }
   }
 
   // If a plain-text password was sent, hash it and swap it out before building keys
@@ -2278,6 +2392,14 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
       });
     }
 
+    // What the nest looked like before, so the history can say what changed
+    // (a status moving to hatching, a relocation, a corrected clutch) rather
+    // than just that somebody saved it.
+    const before = await db.query(
+      "SELECT nest_code, status, relocated, beach, total_num_eggs, current_num_eggs, is_archived FROM turtle_nests WHERE id = $1 LIMIT 1;",
+      [id]
+    );
+
     const sql = `
       UPDATE turtle_nests
       SET
@@ -2353,6 +2475,15 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Nest not found." });
     }
+
+    const changes = describeNestChanges(before.rows[0], result.rows[0]);
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: result.rows[0].id,
+      action: changes.archived ? "archived" : changes.restored ? "restored" : "updated",
+      req,
+      summary: changes.text,
+    });
 
     res.json({
       message: "Nest updated successfully",
@@ -2534,12 +2665,22 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     }
 
     const nestResult = await db.query(
-      `SELECT id FROM turtle_nests WHERE nest_code = $1 LIMIT 1;`,
+      `SELECT n.id, n.total_num_eggs, ${EMERGED_SO_FAR_SQL}) AS emerged_so_far
+       FROM turtle_nests n WHERE n.nest_code = $1 LIMIT 1;`,
       [nest_code]
     );
 
     if (nestResult.rows.length === 0) {
       return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const excess = hatchlingsExceedClutch(
+      req.body,
+      nestResult.rows[0].total_num_eggs,
+      nestResult.rows[0].emerged_so_far
+    );
+    if (excess) {
+      return res.status(400).json({ error: excess });
     }
 
     const nest_id = nestResult.rows[0].id;
@@ -2593,7 +2734,11 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     const result = await db.query(sql, values);
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
     await recordAudit(db, { recordType: "nest_event", recordId: result.rows[0]?.id, action: "created", req,
-      summary: result.rows[0]?.event_type || null });
+      summary: describeNestEvent(result.rows[0]) });
+    // The event's own audit row is on the event; the nest's history is what a
+    // coordinator reads, so the same fact is entered there too.
+    await recordAudit(db, { recordType: "nest", recordId: nest_id, action: "updated", req,
+      summary: `${describeNestEvent(result.rows[0])} (${nest_code})` });
     res.json({ message: "Turtle nest event created successfully", event: result.rows[0], review });
 
   } catch (err) {
@@ -2717,6 +2862,22 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    // Same ceiling as on create, with this event's own earlier tracks left out
+    // of the running total so correcting a count is not blocked by itself.
+    const clutchResult = await db.query(
+      `SELECT n.total_num_eggs, ${EMERGED_SO_FAR_SQL} AND e.id <> $2) AS emerged_so_far
+       FROM turtle_nests n WHERE n.id = $1 LIMIT 1;`,
+      [nest_id, id]
+    );
+    const excess = hatchlingsExceedClutch(
+      req.body,
+      clutchResult.rows[0]?.total_num_eggs,
+      clutchResult.rows[0]?.emerged_so_far
+    );
+    if (excess) {
+      return res.status(400).json({ error: excess });
+    }
+
     const sql = `
       UPDATE turtle_nest_events
       SET
@@ -2770,6 +2931,11 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Event not found." });
     }
+
+    await recordAudit(db, { recordType: "nest_event", recordId: result.rows[0].id, action: "updated", req,
+      summary: describeNestEvent(result.rows[0]) });
+    await recordAudit(db, { recordType: "nest", recordId: result.rows[0].nest_id, action: "updated", req,
+      summary: `${describeNestEvent(result.rows[0])} corrected (${result.rows[0].nest_code})` });
 
     res.json({
       message: "Nest event updated successfully",
@@ -2842,10 +3008,17 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
 // Get all turtle emergences
 app.get("/emergences", async (req, res) => {
   try {
+    // An emergence that became a nest is a nesting; one that did not is a false
+    // crawl. The link is turtle_nests.emergence_id, so it is derived here rather
+    // than stored twice and left to drift.
     const sql = `
-      SELECT id, distance_to_sea_s, gps_lat, gps_long, event_date, beach, created_at, updated_at
-      FROM turtle_emergences
-      ORDER BY event_date DESC;
+      SELECT e.id, e.distance_to_sea_s, e.gps_lat, e.gps_long, e.event_date, e.beach,
+             e.created_at, e.updated_at,
+             n.nest_code AS nest_code,
+             CASE WHEN n.id IS NULL THEN 'False crawl' ELSE 'Nesting' END AS emergence_type
+      FROM turtle_emergences e
+      LEFT JOIN turtle_nests n ON n.emergence_id = e.id
+      ORDER BY e.event_date DESC, e.id DESC;
     `;
 
     const result = await db.query(sql);
@@ -3192,15 +3365,11 @@ app.delete("/timetable/remove", requireRole(COORDINATOR, LEADER), async (req, re
 // Get all beaches
 app.get("/beaches", async (req, res) => {
   try {
+    // SELECT * so the optional reference-point columns come along once the boot
+    // migration has added them, without this breaking on a database that has not
+    // been migrated yet. Nothing sensitive lives on this table.
     const sql = `
-      SELECT 
-        id, 
-        name, 
-        code, 
-        station, 
-        survey_area, 
-        is_active, 
-        created_at
+      SELECT *
       FROM beaches
       ORDER BY station ASC, survey_area ASC, name ASC;
     `;
@@ -3247,7 +3416,25 @@ const readBeachBody = (body) => {
   if (!station) return { error: "A beach needs a station." };
   if (!survey_area) return { error: "A beach needs a survey area." };
 
-  return { value: { name, code, station, survey_area } };
+  // Optional reference point and how far from it a nest can sit and still count
+  // as being on this beach.
+  const lat = asNumber(body?.gps_lat);
+  const long = asNumber(body?.gps_long);
+  const radius = asNumber(body?.radius_m);
+  if ((lat === null) !== (long === null)) {
+    return { error: "Give both a latitude and a longitude for the beach, or neither." };
+  }
+  if (lat !== null && (!Number.isFinite(lat) || lat < LAT.min || lat > LAT.max)) {
+    return { error: "gps_lat must be a number between -90 and 90." };
+  }
+  if (long !== null && (!Number.isFinite(long) || long < LONG.min || long > LONG.max)) {
+    return { error: "gps_long must be a number between -180 and 180." };
+  }
+  if (radius !== null && (!Number.isInteger(radius) || radius < 20 || radius > 5000)) {
+    return { error: "radius_m must be a whole number of metres between 20 and 5000." };
+  }
+
+  return { value: { name, code, station, survey_area, gps_lat: lat, gps_long: long, radius_m: radius } };
 };
 
 app.post("/beaches", requireRole(COORDINATOR), async (req, res) => {
@@ -3256,10 +3443,11 @@ app.post("/beaches", requireRole(COORDINATOR), async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO beaches (name, code, station, survey_area, is_active)
-       VALUES ($1, $2, $3, $4, true)
-       RETURNING id, name, code, station, survey_area, is_active, created_at;`,
-      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area]
+      `INSERT INTO beaches (name, code, station, survey_area, is_active, gps_lat, gps_long, radius_m)
+       VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+       RETURNING *;`,
+      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area,
+       parsed.value.gps_lat, parsed.value.gps_long, parsed.value.radius_m]
     );
     res.status(201).json({ message: "Beach created successfully", beach: result.rows[0] });
   } catch (err) {
@@ -3299,10 +3487,18 @@ app.patch("/beaches/:id", requireRole(COORDINATOR), async (req, res) => {
 
   try {
     const result = await db.query(
-      `UPDATE beaches SET name = $1, code = $2, station = $3, survey_area = $4
+      // A body that never mentions the reference point leaves it as it was; one
+      // that sends null or "" clears it. Otherwise renaming a beach from a client
+      // that predates these fields would quietly wipe its coordinates.
+      `UPDATE beaches SET name = $1, code = $2, station = $3, survey_area = $4,
+              gps_lat  = CASE WHEN $9 THEN $6 ELSE gps_lat END,
+              gps_long = CASE WHEN $9 THEN $7 ELSE gps_long END,
+              radius_m = CASE WHEN $10 THEN $8 ELSE radius_m END
        WHERE id = $5
-       RETURNING id, name, code, station, survey_area, is_active, created_at;`,
-      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area, id]
+       RETURNING *;`,
+      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area, id,
+       parsed.value.gps_lat, parsed.value.gps_long, parsed.value.radius_m,
+       "gps_lat" in req.body || "gps_long" in req.body, "radius_m" in req.body]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Beach not found." });
     res.json({ message: "Beach updated successfully", beach: result.rows[0] });
@@ -3698,6 +3894,50 @@ const aiUnavailable = (res, err) =>
 // nothing here gates reading or writing field data; it only tracks decisions.
 //--------------------------------------------------------------
 
+// What a reviewer needs in order to check a record before confirming it: the
+// date, place and figures - never the image bytes, only whether there are any.
+// Each query lists its columns by hand (the table is fixed, not from the
+// request) and is tried on its own, so one type failing cannot blank the queue.
+const REVIEW_DETAIL_SQL = {
+  nest: `SELECT n.id, n.nest_code, n.beach, n.date_found, n.gps_lat, n.gps_long,
+                n.total_num_eggs, n.distance_to_sea_s, n.status, n.relocated, n.notes,
+                (SELECT COUNT(*) FROM nest_photos p WHERE p.nest_id = n.id)::int AS photo_count,
+                (n.tri_tl_img IS NOT NULL OR n.tri_tr_img IS NOT NULL) AS has_triangulation_photos
+         FROM turtle_nests n WHERE n.id = ANY($1::int[]);`,
+  emergence: `SELECT e.id, e.beach, e.event_date, e.gps_lat, e.gps_long, e.distance_to_sea_s,
+                     (e.track_sketch IS NOT NULL) AS has_track_sketch,
+                     n.nest_code AS linked_nest_code,
+                     CASE WHEN n.id IS NULL THEN 'False crawl' ELSE 'Nesting' END AS emergence_type
+              FROM turtle_emergences e
+              LEFT JOIN turtle_nests n ON n.emergence_id = e.id
+              WHERE e.id = ANY($1::int[]);`,
+  nest_event: `SELECT ev.id, ev.event_type, ev.nest_code, ev.start_time, ev.end_time, ev.observer,
+                      ev.total_eggs, ev.hatched_count, ev.tracks_to_sea, ev.tracks_lost, ev.notes
+               FROM turtle_nest_events ev WHERE ev.id = ANY($1::int[]);`,
+  turtle: `SELECT t.id, t.name, t.species, t.sex, t.health_condition,
+                  t.front_left_tag, t.front_right_tag, t.rear_left_tag, t.rear_right_tag
+           FROM turtles t WHERE t.id = ANY($1::int[]);`,
+  morning_survey: `SELECT ms.id, ms.survey_date, ms.start_time, ms.end_time, b.name AS beach,
+                          ms.protected_nest_count, ms.notes
+                   FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
+                   WHERE ms.id = ANY($1::int[]);`,
+};
+
+const loadReviewDetails = async (byType) => {
+  const details = new Map();
+  for (const [type, ids] of byType) {
+    const sql = REVIEW_DETAIL_SQL[type];
+    if (!sql) continue;
+    try {
+      const found = await db.query(sql, [ids]);
+      for (const row of found?.rows || []) details.set(`${type}:${row.id}`, row);
+    } catch (err) {
+      console.error(`Could not load review detail for ${type}:`, err.message);
+    }
+  }
+  return details;
+};
+
 // Resolves review rows to a short description of the record each one points at.
 // One query per record type present, rather than a five-way LEFT JOIN that
 // would be unreadable and mostly NULL.
@@ -3721,9 +3961,12 @@ const describeReviewedRecords = async (rows) => {
     for (const row of found.rows) labels.set(`${type}:${row.id}`, row.label);
   }
 
+  const details = await loadReviewDetails(byType);
+
   return rows.map((r) => ({
     ...r,
     record_label: labels.get(`${r.record_type}:${r.record_id}`) ?? null,
+    record_detail: details.get(`${r.record_type}:${r.record_id}`) ?? null,
     record_kind: REVIEWABLE[r.record_type]?.label ?? r.record_type,
     // A record that no longer exists was deleted after being submitted. Say so
     // rather than showing a reviewer a blank row they cannot act on.
