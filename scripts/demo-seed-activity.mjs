@@ -112,43 +112,82 @@ const run = async () => {
   // by the auditor, and rightly.
   const GROWTH_CM = 0.4;
 
+  // Every morphometric is required by the endpoint, so an encounter carries
+  // the full set rather than the two or three that happen to be interesting.
+  // Each is taken from the animal's current record; the earlier encounter is
+  // the same animal one season's growth smaller.
+  const MEASUREMENTS = [
+    'scl_max', 'scl_min', 'scw',
+    'ccl_max', 'ccl_min', 'ccw',
+    'tail_extension', 'vent_to_tail_tip', 'total_tail_length',
+  ];
+  // Fallbacks for a turtle whose record is missing one, so a gap in the demo
+  // data cannot produce an encounter with a null measurement.
+  const TYPICAL = {
+    scl_max: 82, scl_min: 80, scw: 62,
+    ccl_max: 85, ccl_min: 83, ccw: 66,
+    tail_extension: 11, vent_to_tail_tip: 15, total_tail_length: 26,
+  };
+
+  const sizeAt = (t, grownBy) => {
+    const out = {};
+    for (const key of MEASUREMENTS) {
+      const current = Number(t[key]);
+      const base = Number.isFinite(current) && current > 0 ? current : TYPICAL[key];
+      out[key] = Number((base + grownBy).toFixed(1));
+    }
+    return out;
+  };
+
   let encounterPlan = [];
   for (const [i, t] of needEncounters.entries()) {
     const first = addDays(new Date(), -(120 + (i * 7) % 60));  // last season
     const second = addDays(new Date(), -(20 + (i * 5) % 40));  // this one
-    const base = Number(t.ccl_max) || 82;
 
     encounterPlan.push(
-      { turtle: t, date: iso(first),  ccl: (base - GROWTH_CM).toFixed(1), type: 'Nesting',  beach: BEACHES[i % BEACHES.length] },
-      { turtle: t, date: iso(second), ccl: base.toFixed(1),               type: 'Nesting',  beach: BEACHES[(i + 2) % BEACHES.length] },
+      { turtle: t, date: iso(first),  size: sizeAt(t, -GROWTH_CM), type: 'Nesting', beach: BEACHES[i % BEACHES.length] },
+      { turtle: t, date: iso(second), size: sizeAt(t, 0),          type: 'Nesting', beach: BEACHES[(i + 2) % BEACHES.length] },
     );
   }
 
+  // What POST /turtle_survey_events/create insists on. Checked here so a
+  // missing field shows up in the preview, rather than as four 400s partway
+  // through a run that has already written something.
+  const REQUIRED_EVENT_FIELDS = [
+    'event_type', 'location', 'turtle_id',
+    ...MEASUREMENTS, 'health_condition', 'observer',
+  ];
+
   for (const e of encounterPlan) {
     const who = e.turtle.name || `turtle ${e.turtle.id}`;
-    const desc = `${who.padEnd(12)} ${e.date}  ${e.beach.padEnd(15)} CCL ${e.ccl}cm`;
+    const desc = `${who.padEnd(12)} ${e.date}  ${e.beach.padEnd(15)} CCL ${e.size.ccl_max}cm`;
+
+    const body = {
+      turtle_id: e.turtle.id,
+      event_date: e.date,
+      event_type: e.type,
+      location: e.beach,
+      observer: OBSERVERS[Number(e.turtle.id) % OBSERVERS.length],
+      health_condition: e.turtle.health_condition || 'Healthy',
+      // Carried forward so the encounter shows the tags the animal wore
+      // that day, which is what a recapture record is for.
+      front_left_tag: e.turtle.front_left_tag || null,
+      front_left_address: e.turtle.front_left_address || null,
+      front_right_tag: e.turtle.front_right_tag || null,
+      front_right_address: e.turtle.front_right_address || null,
+      ...e.size,
+    };
+
+    const missing = REQUIRED_EVENT_FIELDS.filter((f) => body[f] === undefined || body[f] === null);
+    if (missing.length > 0) {
+      console.log(`  SKIP ${desc} — would be rejected, missing: ${missing.join(', ')}`);
+      continue;
+    }
+
     if (!CONFIRM) { console.log(`  DRY  ${desc}`); continue; }
 
     const res = await fetch(`${API}/turtle_survey_events/create`, {
-      method: 'POST', headers: cAuth,
-      body: JSON.stringify({
-        turtle_id: e.turtle.id,
-        event_date: e.date,
-        event_type: e.type,
-        location: e.beach,
-        observer: OBSERVERS[Number(e.turtle.id) % OBSERVERS.length],
-        // Carried forward so the encounter shows the tags the animal wore
-        // that day, which is what a recapture record is for.
-        front_left_tag: e.turtle.front_left_tag || null,
-        front_left_address: e.turtle.front_left_address || null,
-        front_right_tag: e.turtle.front_right_tag || null,
-        front_right_address: e.turtle.front_right_address || null,
-        ccl_max: e.ccl,
-        ccl_min: (Number(e.ccl) - 0.8).toFixed(1),
-        scl_max: e.turtle.scl_max ?? null,
-        ccw: e.turtle.ccw ?? null,
-        health_condition: e.turtle.health_condition || 'Healthy',
-      }),
+      method: 'POST', headers: cAuth, body: JSON.stringify(body),
     });
     console.log(res.ok ? `  OK   ${desc}` : `  FAIL ${desc} — ${res.status} ${await res.text()}`);
   }
