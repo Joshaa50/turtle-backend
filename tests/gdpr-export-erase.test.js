@@ -119,6 +119,16 @@ describe('erasure', () => {
     expect(update[0]).not.toMatch(/station = NULL/i);
   });
 
+  it('does not ask Timetable for a column it does not have', async () => {
+    // Its key is assignment_id. RETURNING id aborted the transaction, so every
+    // erasure rolled back while reporting a server error - a failure that
+    // looks identical to the database being down.
+    stubEraseFlow();
+    await erase({ confirm_email: PERSON.email });
+    const del = client.query.mock.calls.find(([s]) => /DELETE FROM Timetable/i.test(s));
+    expect(del[0]).not.toMatch(/RETURNING id/i);
+  });
+
   it('keeps the fieldwork and deletes only the rota', async () => {
     stubEraseFlow();
     await erase({ confirm_email: PERSON.email });

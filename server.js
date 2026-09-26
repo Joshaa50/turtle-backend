@@ -1060,7 +1060,11 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     // A rota is about who is working, so an erased person's shifts have no
     // reason to persist. Field records do, which is why only this one is a
     // delete.
-    const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1 RETURNING id;`, [id]);
+    // No RETURNING: this table's key is assignment_id, and asking for a
+    // column that does not exist aborted the transaction - so the erasure
+    // rolled back every time while reporting a server error. rowCount is what
+    // the response actually reports anyway.
+    const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1;`, [id]);
 
     // The trail keeps its shape - something was created, by a coordinator, on
     // a date - without keeping the address that identifies who.
