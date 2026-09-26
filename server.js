@@ -2724,6 +2724,131 @@ app.get("/beaches", async (req, res) => {
   }
 });
 
+// Create / edit / retire a beach
+//---------------------------------------------------------------
+// Beaches, their survey areas and their station names were fixed rows loaded
+// once for one project on Kefalonia. Another organisation could not add its
+// own sites without someone editing the database by hand, which made the app
+// impossible to adopt without its developer. Coordinators and leaders manage
+// them here instead.
+
+const BEACH_CODE_RE = /^[A-Z0-9]{1,8}$/;
+
+// The code prefixes every nest at the beach (LG2-4), so it has to be short,
+// stable and unique - a duplicate would hand two beaches the same nest codes.
+const readBeachBody = (body) => {
+  const name = String(body?.name ?? "").trim();
+  const code = String(body?.code ?? "").trim().toUpperCase();
+  const station = String(body?.station ?? "").trim();
+  const survey_area = String(body?.survey_area ?? "").trim();
+
+  if (!name) return { error: "A beach needs a name." };
+  if (!code) return { error: "A beach needs a short code (it prefixes every nest code here)." };
+  if (!BEACH_CODE_RE.test(code)) {
+    return { error: "The code must be 1-8 letters or digits, e.g. LG2." };
+  }
+  if (!station) return { error: "A beach needs a station." };
+  if (!survey_area) return { error: "A beach needs a survey area." };
+
+  return { value: { name, code, station, survey_area } };
+};
+
+app.post("/beaches", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  const parsed = readBeachBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  try {
+    const result = await db.query(
+      `INSERT INTO beaches (name, code, station, survey_area, is_active)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING id, name, code, station, survey_area, is_active, created_at;`,
+      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area]
+    );
+    res.status(201).json({ message: "Beach created successfully", beach: result.rows[0] });
+  } catch (err) {
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "That beach code is already in use." });
+    }
+    console.error("Create beach error:", err);
+    res.status(500).json({ error: "Server error while creating the beach." });
+  }
+});
+
+app.patch("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  const { id } = req.params;
+
+  // is_active on its own is the "retire this beach" path and skips the
+  // name/code checks, which would otherwise demand a full body to hide a row.
+  const onlyActiveFlag =
+    Object.keys(req.body || {}).length === 1 && typeof req.body.is_active === "boolean";
+
+  if (onlyActiveFlag) {
+    try {
+      const result = await db.query(
+        `UPDATE beaches SET is_active = $1 WHERE id = $2
+         RETURNING id, name, code, station, survey_area, is_active, created_at;`,
+        [req.body.is_active, id]
+      );
+      if (result.rows.length === 0) return res.status(404).json({ error: "Beach not found." });
+      return res.json({ message: "Beach updated successfully", beach: result.rows[0] });
+    } catch (err) {
+      console.error("Retire beach error:", err);
+      return res.status(500).json({ error: "Server error while updating the beach." });
+    }
+  }
+
+  const parsed = readBeachBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  try {
+    const result = await db.query(
+      `UPDATE beaches SET name = $1, code = $2, station = $3, survey_area = $4
+       WHERE id = $5
+       RETURNING id, name, code, station, survey_area, is_active, created_at;`,
+      [parsed.value.name, parsed.value.code, parsed.value.station, parsed.value.survey_area, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Beach not found." });
+    res.json({ message: "Beach updated successfully", beach: result.rows[0] });
+  } catch (err) {
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "That beach code is already in use." });
+    }
+    console.error("Update beach error:", err);
+    res.status(500).json({ error: "Server error while updating the beach." });
+  }
+});
+
+// Deliberately no DELETE. Nests, surveys and emergences reference their beach
+// by name, so removing the row would orphan seasons of fieldwork to keep a
+// list tidy. Retiring it hides it from the pickers and keeps the history
+// readable - the same reasoning as deactivating a user rather than deleting
+// them.
+app.delete("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  res.status(405).json({
+    error: "Beaches are retired, not deleted, so the records made at them stay readable. Set is_active to false instead.",
+  });
+});
+
+// The distinct stations and survey areas actually in use, so the forms can
+// offer what this organisation uses rather than the two hard-coded names of
+// the project this was first built for.
+app.get("/beaches/groupings", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT
+         ARRAY(SELECT DISTINCT station FROM beaches WHERE station <> '' ORDER BY station) AS stations,
+         ARRAY(SELECT DISTINCT survey_area FROM beaches WHERE survey_area <> '' ORDER BY survey_area) AS survey_areas;`
+    );
+    res.json({
+      stations: result.rows[0]?.stations || [],
+      survey_areas: result.rows[0]?.survey_areas || [],
+    });
+  } catch (err) {
+    console.error("Get beach groupings error:", err);
+    res.status(500).json({ error: "Server error while fetching stations and areas." });
+  }
+});
+
 // Morning survey table
 //-------------------------------------------------------------------
 
