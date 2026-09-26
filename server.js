@@ -232,6 +232,86 @@ const RECORDERS = [COORDINATOR, LEADER, "Field Assistant", "Field Volunteer"];
 const VOLUNTEER = "Field Volunteer";
 const REVIEWERS = [COORDINATOR, LEADER];
 
+// ---------------------------------------------------------------------------
+// Audit trail
+//
+// Nothing recorded who created or changed a record. Some rows carry an
+// observer name as free text, which is who was on the beach, not who typed it
+// in or who edited it afterwards. A project reporting under permit has to be
+// able to answer "who entered this, and has it been changed since" - and when
+// a count is challenged, an unanswerable question is worse than an
+// inconvenient answer.
+//
+// Append-only by intent: there is no route that updates or deletes a row here.
+// An audit log a user can edit is not one.
+// ---------------------------------------------------------------------------
+
+const AUDIT_ACTIONS = new Set(["created", "updated", "deleted", "archived", "restored"]);
+
+/**
+ * Appends one entry. `executor` is the pool or an open transaction client, so
+ * a route already in a transaction enrols the audit row in the same one and
+ * the pair cannot half-commit.
+ *
+ * Never throws: a failure to log must not turn a saved observation into an
+ * error for the person who recorded it. It is logged loudly instead - the cost
+ * is a gap in the trail, which is strictly better than telling a field worker
+ * their save failed when it did not.
+ */
+const recordAudit = async (executor, { recordType, recordId, action, req, summary = null }) => {
+  if (recordId == null || !AUDIT_ACTIONS.has(action)) return null;
+  try {
+    const result = await executor.query(
+      `INSERT INTO record_audit (record_type, record_id, action, actor_id, actor_email, actor_role, summary)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, record_type, record_id, action, actor_email, actor_role, summary, occurred_at;`,
+      [
+        recordType,
+        recordId,
+        action,
+        req?.user?.id ?? null,
+        req?.user?.email ?? null,
+        req?.user?.role ?? null,
+        summary,
+      ]
+    );
+    return result.rows[0] || null;
+  } catch (err) {
+    console.error(`Could not audit ${action} on ${recordType} ${recordId}:`, err.message);
+    return null;
+  }
+};
+
+// Same idempotent boot-migration pattern as record_reviews: safe on every
+// boot, skipped when the module is only imported for tests.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS record_audit (
+          id           SERIAL PRIMARY KEY,
+          record_type  TEXT        NOT NULL,
+          record_id    INTEGER     NOT NULL,
+          action       TEXT        NOT NULL,
+          actor_id     INTEGER,
+          actor_email  TEXT,
+          actor_role   TEXT,
+          summary      TEXT,
+          occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      // The only query this table serves is "history of one record, newest
+      // first", and it grows forever, so it is worth an index from the start.
+      await db.query(
+        "CREATE INDEX IF NOT EXISTS record_audit_lookup ON record_audit (record_type, record_id, occurred_at DESC);"
+      );
+      console.log("record_audit is present.");
+    } catch (err) {
+      console.error("Could not ensure record_audit:", err.message);
+    }
+  })();
+}
+
 // The record types that can carry a review. Keyed by the table the id belongs
 // to, so a review row can be resolved back to the thing it describes.
 const REVIEWABLE = {
@@ -732,6 +812,19 @@ app.patch("/users/:id", async (req, res) => {
       return res.status(404).json({ error: "User not found." });
     }
 
+    // Spell out the changes that decide what somebody can do. "User updated"
+    // in a permission log answers nothing.
+    const notable = keys
+      .filter((k) => k === "role" || k === "is_active" || k === "is_email_verified")
+      .map((k) => `${k} -> ${updates[k]}`);
+    await recordAudit(db, {
+      recordType: "user",
+      recordId: result.rows[0]?.id,
+      action: "updated",
+      req,
+      summary: notable.length > 0 ? notable.join(", ") : `changed: ${keys.join(", ")}`,
+    });
+
     res.json({
       message: "User updated successfully",
       user: result.rows[0]
@@ -966,6 +1059,8 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
     ]);
 
     const review = await queueReviewSafely("turtle", result.rows[0]?.id, req);
+    await recordAudit(db, { recordType: "turtle", recordId: result.rows[0]?.id, action: "created", req,
+      summary: result.rows[0]?.name ? `Turtle "${result.rows[0].name}"` : null });
 
     res.json({
       message: "Turtle record created successfully",
@@ -1087,6 +1182,14 @@ app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistan
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Turtle not found." });
     }
+
+    await recordAudit(db, {
+      recordType: "turtle",
+      recordId: result.rows[0]?.id,
+      action: archived ? "archived" : "restored",
+      req,
+      summary: result.rows[0]?.name || null,
+    });
 
     res.json({
       message: archived ? "Turtle archived." : "Turtle restored.",
@@ -1693,6 +1796,9 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
     // Enrolled in the same transaction as the nest, so a volunteer's record and
     // its place in the review queue commit together or not at all.
     const review = await queueReview(client, "nest", nestResult.rows[0]?.id, req);
+    // In the transaction: a nest and its audit row commit together or not at all.
+    await recordAudit(client, { recordType: "nest", recordId: nestResult.rows[0]?.id, action: "created", req,
+      summary: nestResult.rows[0]?.nest_code ? `Nest ${nestResult.rows[0].nest_code}` : null });
 
     await client.query("COMMIT");
 
@@ -2102,6 +2208,8 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
 
     const result = await db.query(sql, values);
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
+    await recordAudit(db, { recordType: "nest_event", recordId: result.rows[0]?.id, action: "created", req,
+      summary: result.rows[0]?.event_type || null });
     res.json({ message: "Turtle nest event created successfully", event: result.rows[0], review });
 
   } catch (err) {
@@ -2333,6 +2441,8 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
     ]);
 
     const review = await queueReviewSafely("emergence", result.rows[0]?.id, req);
+    await recordAudit(db, { recordType: "emergence", recordId: result.rows[0]?.id, action: "created", req,
+      summary: result.rows[0]?.beach ? `Emergence at ${result.rows[0].beach}` : null });
 
     res.status(201).json({
       message: "Emergence recorded successfully",
@@ -2829,6 +2939,43 @@ app.delete("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) =>
   });
 });
 
+// Audit trail for one record
+//---------------------------------------------------------------
+// Reviewers only. The trail names who touched a record and when, which is
+// staff information rather than fieldwork, so it is not something every
+// volunteer should be able to read about their colleagues.
+app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, res) => {
+  const { recordType, recordId } = req.params;
+
+  if (!/^\d+$/.test(recordId)) {
+    return res.status(400).json({ error: "recordId must be a number." });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT id, record_type, record_id, action, actor_id, actor_email, actor_role, summary, occurred_at
+       FROM record_audit
+       WHERE record_type = $1 AND record_id = $2
+       ORDER BY occurred_at DESC, id DESC
+       LIMIT 200;`,
+      [recordType, Number(recordId)]
+    );
+
+    res.json({
+      record_type: recordType,
+      record_id: Number(recordId),
+      // An empty trail means this record predates the audit log, not that
+      // nobody touched it. Saying so stops it being read as proof of nothing
+      // having happened.
+      entries: result.rows,
+      complete: result.rows.some((r) => r.action === "created"),
+    });
+  } catch (err) {
+    console.error("Get audit trail error:", err);
+    res.status(500).json({ error: "Server error while fetching the audit trail." });
+  }
+});
+
 // The distinct stations and survey areas actually in use, so the forms can
 // offer what this organisation uses rather than the two hard-coded names of
 // the project this was first built for.
@@ -2898,6 +3045,8 @@ app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
     const result = await db.query(sql, values);
 
     const review = await queueReviewSafely("morning_survey", result.rows[0]?.id, req);
+    await recordAudit(db, { recordType: "morning_survey", recordId: result.rows[0]?.id, action: "created", req,
+      summary: result.rows[0]?.beach ? `Survey of ${result.rows[0].beach}` : null });
 
     res.status(201).json({
       message: "Morning survey recorded successfully",
