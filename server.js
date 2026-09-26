@@ -1088,7 +1088,22 @@ app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistan
 
 app.get("/turtles", async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM turtles ORDER BY is_archived ASC, created_at DESC;");
+    // last_seen_at is the most recent ENCOUNTER, not the row's updated_at.
+    // The list used to show updated_at under a "Last seen" heading, so
+    // correcting a typo in a turtle's name moved the date it was last
+    // observed - and that date was exported to CSV and read as fieldwork.
+    // NULL here means genuinely never encountered, which the UI must show as
+    // such rather than falling back to a timestamp that means something else.
+    const result = await db.query(`
+      SELECT t.*, e.last_seen_at, COALESCE(e.sighting_count, 0)::int AS sighting_count
+      FROM turtles t
+      LEFT JOIN (
+        SELECT turtle_id, MAX(event_date) AS last_seen_at, COUNT(*) AS sighting_count
+        FROM turtle_survey_events
+        GROUP BY turtle_id
+      ) e ON e.turtle_id = t.id
+      ORDER BY t.is_archived ASC, t.created_at DESC;
+    `);
 
     res.json({
       message: "Turtles fetched successfully",
