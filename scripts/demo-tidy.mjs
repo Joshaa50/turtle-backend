@@ -5,6 +5,8 @@
 // example.com, which is reserved for exactly this. Both are reversible, and a
 // full snapshot is written before anything changes.
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const API = process.env.VITE_API_URL || 'https://turtle-backend-pxcx.onrender.com';
 const CONFIRM = process.argv.includes('--confirm');
@@ -56,11 +58,17 @@ const run = async () => {
   const byId = new Map(users.map(u => [String(u.id), u]));
 
   if (CONFIRM) {
-    const dir = new URL('../qa-out/', import.meta.url).pathname;
+    // fileURLToPath, not URL.pathname: pathname keeps the percent-encoding, so
+    // a project directory with a space in its name ("Turtle guard") wrote the
+    // snapshot to a literal "Turtle%20guard" folder instead of this repo.
+    const dir = fileURLToPath(new URL('../qa-out/', import.meta.url));
     fs.mkdirSync(dir, { recursive: true });
-    const path = `${dir}users-before-demo-tidy.json`;
-    fs.writeFileSync(path, JSON.stringify(users, null, 2));
-    console.log(`snapshot of all ${users.length} accounts written to ${path}\n`);
+    // Stamped, so a second run cannot overwrite the rollback data the first
+    // one captured - which is the whole reason the snapshot exists.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const out = path.join(dir, `users-before-demo-tidy-${stamp}.json`);
+    fs.writeFileSync(out, JSON.stringify(users, null, 2));
+    console.log(`snapshot of all ${users.length} accounts written to ${out}\n`);
   }
 
   const plan = [
