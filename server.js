@@ -2960,12 +2960,29 @@ app.delete("/morning-surveys/:id/emergences/:emergence_id", async (req, res) => 
 // The frontend calls these endpoints instead of talking to Google directly.
 const { GoogleGenAI, Type } = require("@google/genai");
 
+// Thrown when the deployment simply has no key, as opposed to Gemini itself
+// failing. The two need different answers: one is a 503 the caller can explain
+// to a user ("this feature isn't switched on here"), the other is a real 500.
+class AiNotConfiguredError extends Error {
+  constructor() {
+    super("The AI assistant is not configured on this server.");
+    this.name = "AiNotConfiguredError";
+  }
+}
+
 const getAiClient = () => {
   if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not configured on the server.");
+    throw new AiNotConfiguredError();
   }
   return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 };
+
+// A missing key is a deployment fact, not a transient fault - say so plainly
+// rather than returning a generic 500 that looks like the feature is broken.
+const aiUnavailable = (res, err) =>
+  err instanceof AiNotConfiguredError
+    ? res.status(503).json({ error: err.message, code: "AI_NOT_CONFIGURED" })
+    : null;
 
 // Natural-language questions about nest records -> { text?, chart? }
 //--------------------------------------------------------------
@@ -3207,6 +3224,7 @@ ${JSON.stringify((nests || []).map((n) => ({
     jsonStr = jsonStr.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     return res.json(JSON.parse(jsonStr));
   } catch (err) {
+    if (aiUnavailable(res, err)) return;
     console.error("AI nest-query error:", err);
     return res.status(500).json({ error: "Failed to process query." });
   }
@@ -3275,6 +3293,7 @@ app.post("/ai/analyze-audio", async (req, res) => {
 
     return res.json(JSON.parse(response.text || "{}"));
   } catch (err) {
+    if (aiUnavailable(res, err)) return;
     console.error("AI analyze-audio error:", err);
     return res.status(500).json({ error: "Failed to analyze audio." });
   }
