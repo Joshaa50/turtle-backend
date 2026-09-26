@@ -1626,6 +1626,22 @@ if (require.main === module) {
            WHERE status <> 'pending' AND acknowledged_at IS NULL;`
         );
       }
+      // Reviews of nests/emergences that belong to a surveyed form are covered
+      // by the survey's review; drop the ones queued before that was so.
+      for (const [type, link, col] of [
+        ["nest", "morning_survey_nests", "nest_id"],
+        ["emergence", "morning_survey_emergences", "emergence_id"],
+      ]) {
+        await db.query(
+          `DELETE FROM record_reviews r
+           WHERE r.record_type = '${type}' AND r.status = 'pending'
+             AND EXISTS (
+               SELECT 1 FROM ${link} l
+               JOIN record_reviews s ON s.record_type = 'morning_survey' AND s.record_id = l.survey_id
+               WHERE l.${col} = r.record_id
+             );`
+        );
+      }
       console.log("record_reviews is present.");
     } catch (err) {
       console.error("Could not ensure record_reviews:", err.message);
@@ -1948,6 +1964,27 @@ const applyAutoApprove = async () => {
     );
   } catch (err) {
     console.error("Auto-approve failed:", err.message);
+  }
+};
+
+// A morning survey is one form: the nests and emergences recorded on it are
+// part of it, and a Field Leader confirms the whole thing at once. They are
+// created (and queued) individually before they are linked to the survey, so
+// linking is the moment to fold them in - their own pending review is dropped
+// and the survey's review covers them. Only when the survey is itself under
+// review: if it is not, the child's own review is the only one there is.
+// Best-effort like queueReviewSafely - a failure leaves an extra queue entry,
+// never a failed save.
+const foldIntoSurveyReview = async (surveyId, recordType, recordId) => {
+  try {
+    await db.query(
+      `DELETE FROM record_reviews
+       WHERE record_type = $2 AND record_id = $3 AND status = 'pending'
+         AND EXISTS (SELECT 1 FROM record_reviews s WHERE s.record_type = 'morning_survey' AND s.record_id = $1);`,
+      [surveyId, recordType, recordId]
+    );
+  } catch (err) {
+    console.error(`Could not fold ${recordType} ${recordId} into survey ${surveyId}:`, err.message);
   }
 };
 
@@ -4043,6 +4080,8 @@ app.post("/morning-surveys/:id/nests", requireRole(...RECORDERS), async (req, re
       [id, nest_id]
     );
 
+    await foldIntoSurveyReview(id, "nest", nest_id);
+
     res.status(201).json({
       message: "Nest linked to survey successfully",
       link: result.rows[0]
@@ -4090,6 +4129,8 @@ app.post("/morning-surveys/:id/emergences", requireRole(...RECORDERS), async (re
        RETURNING *;`,
       [id, emergence_id]
     );
+
+    await foldIntoSurveyReview(id, "emergence", emergence_id);
 
     res.status(201).json({
       message: "Emergence linked to survey successfully",
@@ -4277,16 +4318,22 @@ const REVIEW_DETAIL_SQL = {
                           (to_jsonb(ms) || jsonb_build_object(
                             'beach', b.name,
                             'linked_nests', COALESCE((
-                              SELECT jsonb_agg(jsonb_build_object(
-                                'nest_code', tn.nest_code, 'date_found', tn.date_found,
-                                'total_num_eggs', tn.total_num_eggs, 'status', tn.status) ORDER BY tn.id)
+                              SELECT jsonb_agg(
+                                ((to_jsonb(tn) - 'tri_tl_img' - 'tri_tr_img') || jsonb_build_object(
+                                  'photo_count', (SELECT COUNT(*) FROM nest_photos p WHERE p.nest_id = tn.id)::int,
+                                  'has_triangulation_photos', (tn.tri_tl_img IS NOT NULL OR tn.tri_tr_img IS NOT NULL)
+                                )) ORDER BY tn.id)
                               FROM morning_survey_nests msn JOIN turtle_nests tn ON tn.id = msn.nest_id
                               WHERE msn.survey_id = ms.id
                             ), '[]'::jsonb),
                             'linked_emergences', COALESCE((
-                              SELECT jsonb_agg(jsonb_build_object(
-                                'beach', te.beach, 'event_date', te.event_date,
-                                'distance_to_sea_s', te.distance_to_sea_s) ORDER BY te.id)
+                              SELECT jsonb_agg(
+                                ((to_jsonb(te) - 'track_sketch') || jsonb_build_object(
+                                  'has_track_sketch', (te.track_sketch IS NOT NULL),
+                                  'linked_nest_code', (SELECT n2.nest_code FROM turtle_nests n2 WHERE n2.emergence_id = te.id LIMIT 1),
+                                  'emergence_type', CASE WHEN EXISTS (SELECT 1 FROM turtle_nests n3 WHERE n3.emergence_id = te.id)
+                                                         THEN 'Nesting' ELSE 'False crawl' END
+                                )) ORDER BY te.id)
                               FROM morning_survey_emergences mse JOIN turtle_emergences te ON te.id = mse.emergence_id
                               WHERE mse.survey_id = ms.id
                             ), '[]'::jsonb)
