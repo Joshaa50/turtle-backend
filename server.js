@@ -1402,6 +1402,16 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       return res.status(404).json({ error: "Turtle not found." });
     }
 
+    // Editing a turtle overwrites its measurements in place, so without this
+    // there is no way to tell a corrected typo from a re-measured animal.
+    await recordAudit(db, {
+      recordType: "turtle",
+      recordId: result.rows[0]?.id,
+      action: "updated",
+      req,
+      summary: result.rows[0]?.name ? `Turtle "${result.rows[0].name}"` : null,
+    });
+
     res.json({
       message: "Turtle updated successfully",
       turtle: result.rows[0]
@@ -1639,6 +1649,14 @@ app.post("/turtle_survey_events/create", async (req, res) => {
     ];
 
     const result = await db.query(sql, values);
+
+    await recordAudit(db, {
+      recordType: "turtle_survey_event",
+      recordId: result.rows[0]?.id,
+      action: "created",
+      req,
+      summary: `${result.rows[0]?.event_type || "Encounter"} of turtle ${turtle_id}${location ? ` at ${location}` : ""}`,
+    });
 
     res.json({
       message: "Turtle survey event created successfully",

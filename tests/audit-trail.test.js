@@ -101,6 +101,29 @@ describe('audit trail', () => {
       expect(call[1][6]).toMatch(/role -> Field Leader/);
     });
 
+    it('records who logged a turtle encounter', async () => {
+      // The recapture record is the one whose provenance matters most in a
+      // tagging programme, and it was the creation path left unaudited.
+      query.mockResolvedValue({ rows: [{ id: 300, event_type: 'Nesting' }] });
+
+      await request(app)
+        .post('/turtle_survey_events/create')
+        .set('Authorization', `Bearer ${tokenFor('Field Leader')}`)
+        .send({
+          event_type: 'Nesting', location: 'Xi', turtle_id: 18,
+          scl_max: 80, scl_min: 78, scw: 60,
+          ccl_max: 83, ccl_min: 81, ccw: 64,
+          tail_extension: 10, vent_to_tail_tip: 14, total_tail_length: 24,
+          health_condition: 'Healthy', observer: 'E. Papadaki',
+        });
+
+      const call = auditInsert();
+      expect(call, 'expected an audit row for the encounter').toBeTruthy();
+      expect(call[1][0]).toBe('turtle_survey_event');
+      expect(call[1][2]).toBe('created');
+      expect(call[1][6]).toMatch(/turtle 18/);
+    });
+
     it('does not fail the save when the audit write itself fails', async () => {
       // A gap in the trail beats telling a field worker their record was lost
       // when it was not.
