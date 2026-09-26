@@ -19,6 +19,9 @@ const DEACTIVATE = [
 // Believable staff personas, but on a real mail provider. Keep the people,
 // move the addresses to the reserved example.com domain.
 const REMAIL = [
+  // A scratch account, despite the real-looking name - and the last active
+  // address left on a real mail provider. The persona stays, the address goes.
+  { id: 1,  email: 'joshua.ali@example.com' },
   { id: 2,  email: 'alicia.pettitt@example.com' },
   { id: 40, email: 'christina.papadopoulou@example.com' },
   { id: 41, email: 'nikos.katsaros@example.com' },
@@ -31,8 +34,8 @@ const REMAIL = [
 ];
 
 // Never touched: the four @turtleguard.demo accounts the demo buttons sign in
-// as, and id 1, which is the owner's own coordinator account.
-const PROTECTED = new Set([1, 48, 49, 50, 51]);
+// as. Losing one of those takes a demo role button down with it.
+const PROTECTED = new Set([48, 49, 50, 51]);
 
 const login = async () => {
   const r = await fetch(`${API}/demo/login`, {
@@ -69,6 +72,11 @@ const run = async () => {
     const u = byId.get(String(step.id));
     if (!u) { console.log(`SKIP  id ${step.id} — not found`); continue; }
     if (PROTECTED.has(Number(step.id))) { console.log(`SKIP  id ${step.id} — protected`); continue; }
+
+    // Idempotent: a row already at its target is not worth a PATCH, and
+    // listing it as work makes the output lie about what the run changed.
+    const done = step.kind === 'deactivate' ? u.is_active === false : u.email === step.email;
+    if (done) { console.log(`DONE  id ${step.id} — already ${step.kind === 'deactivate' ? 'inactive' : step.email}`); continue; }
 
     const name = `${u.first_name || ''} ${u.last_name || ''}`.trim();
     const desc = step.kind === 'deactivate'
