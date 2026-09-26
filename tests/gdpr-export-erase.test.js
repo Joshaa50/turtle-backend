@@ -109,6 +109,16 @@ describe('erasure', () => {
     expect(client.query.mock.calls.map(([s]) => s).join(' ')).toMatch(/COMMIT/);
   });
 
+  it('blanks the station rather than nulling it — the column is NOT NULL', async () => {
+    // Setting it to NULL failed the whole transaction against the real schema,
+    // and the rollback meant an erasure silently did nothing at all.
+    stubEraseFlow();
+    await erase({ confirm_email: PERSON.email });
+    const update = client.query.mock.calls.find(([s]) => /UPDATE users\s+SET first_name/i.test(s));
+    expect(update[0]).toMatch(/station = ''/);
+    expect(update[0]).not.toMatch(/station = NULL/i);
+  });
+
   it('keeps the fieldwork and deletes only the rota', async () => {
     stubEraseFlow();
     await erase({ confirm_email: PERSON.email });

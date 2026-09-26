@@ -1046,9 +1046,13 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     const unusable = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
 
     await client.query(
+      // station is blanked rather than set to NULL: the column is NOT NULL, so
+      // nulling it fails the whole transaction. Empty is equivalent here -
+      // /public/stations already filters station <> '' - so this removes it
+      // from the account without leaving it in any list.
       `UPDATE users
        SET first_name = $1, last_name = '', email = $2, profile_picture = NULL,
-           station = NULL, password_hash = $3, is_active = false, is_email_verified = false
+           station = '', password_hash = $3, is_active = false, is_email_verified = false
        WHERE id = $4;`,
       [ERASED_NAME, erasedEmailFor(id), unusable, id]
     );
