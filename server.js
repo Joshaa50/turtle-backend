@@ -365,7 +365,8 @@ const REVIEWABLE = {
   turtle: { table: "turtles", label: "Turtle", describe: "name" },
   nest_event: { table: "turtle_nest_events", label: "Nest event", describe: "event_type" },
   emergence: { table: "turtle_emergences", label: "Emergence", describe: "beach" },
-  morning_survey: { table: "morning_surveys", label: "Morning survey", describe: "beach" },
+  // morning_surveys stores beach_id, not a beach name, so its label is looked up.
+  morning_survey: { table: "morning_surveys", label: "Morning survey", describe: "(SELECT name FROM beaches WHERE beaches.id = beach_id)" },
 };
 
 // Only these origins may call the API with credentials. Requests with no Origin
@@ -3894,31 +3895,58 @@ const aiUnavailable = (res, err) =>
 // nothing here gates reading or writing field data; it only tracks decisions.
 //--------------------------------------------------------------
 
-// What a reviewer needs in order to check a record before confirming it: the
-// date, place and figures - never the image bytes, only whether there are any.
-// Each query lists its columns by hand (the table is fixed, not from the
-// request) and is tried on its own, so one type failing cannot blank the queue.
+// The whole form a reviewer is confirming, not a summary of it: every column
+// the record holds, so a leader checking an inventory, a morning survey or a
+// tagging sees what the volunteer filled in. Image bytes are the only thing
+// left out (the three BYTEA columns are stripped in the database, so they never
+// travel), replaced by has_* flags. Each query is tried on its own, so one type
+// failing cannot blank the queue. Tables are fixed here, never from the request.
 const REVIEW_DETAIL_SQL = {
-  nest: `SELECT n.id, n.nest_code, n.beach, n.date_found, n.gps_lat, n.gps_long,
-                n.total_num_eggs, n.distance_to_sea_s, n.status, n.relocated, n.notes,
-                (SELECT COUNT(*) FROM nest_photos p WHERE p.nest_id = n.id)::int AS photo_count,
-                (n.tri_tl_img IS NOT NULL OR n.tri_tr_img IS NOT NULL) AS has_triangulation_photos
+  nest: `SELECT n.id,
+                ((to_jsonb(n) - 'tri_tl_img' - 'tri_tr_img') || jsonb_build_object(
+                  'photo_count', (SELECT COUNT(*) FROM nest_photos p WHERE p.nest_id = n.id)::int,
+                  'has_triangulation_photos', (n.tri_tl_img IS NOT NULL OR n.tri_tr_img IS NOT NULL)
+                )) AS detail
          FROM turtle_nests n WHERE n.id = ANY($1::int[]);`,
-  emergence: `SELECT e.id, e.beach, e.event_date, e.gps_lat, e.gps_long, e.distance_to_sea_s,
-                     (e.track_sketch IS NOT NULL) AS has_track_sketch,
-                     n.nest_code AS linked_nest_code,
-                     CASE WHEN n.id IS NULL THEN 'False crawl' ELSE 'Nesting' END AS emergence_type
+  emergence: `SELECT e.id,
+                     ((to_jsonb(e) - 'track_sketch') || jsonb_build_object(
+                       'has_track_sketch', (e.track_sketch IS NOT NULL),
+                       'linked_nest_code', n.nest_code,
+                       'emergence_type', CASE WHEN n.id IS NULL THEN 'False crawl' ELSE 'Nesting' END
+                     )) AS detail
               FROM turtle_emergences e
               LEFT JOIN turtle_nests n ON n.emergence_id = e.id
               WHERE e.id = ANY($1::int[]);`,
-  nest_event: `SELECT ev.id, ev.event_type, ev.nest_code, ev.start_time, ev.end_time, ev.observer,
-                      ev.total_eggs, ev.hatched_count, ev.tracks_to_sea, ev.tracks_lost, ev.notes
+  nest_event: `SELECT ev.id, to_jsonb(ev) AS detail
                FROM turtle_nest_events ev WHERE ev.id = ANY($1::int[]);`,
-  turtle: `SELECT t.id, t.name, t.species, t.sex, t.health_condition,
-                  t.front_left_tag, t.front_right_tag, t.rear_left_tag, t.rear_right_tag
+  // Tagging: the animal itself plus the sightings recorded against it.
+  turtle: `SELECT t.id,
+                  (to_jsonb(t) || jsonb_build_object(
+                    'survey_events', COALESCE((
+                      SELECT jsonb_agg(to_jsonb(se) ORDER BY se.event_date DESC, se.id DESC)
+                      FROM turtle_survey_events se WHERE se.turtle_id = t.id
+                    ), '[]'::jsonb)
+                  )) AS detail
            FROM turtles t WHERE t.id = ANY($1::int[]);`,
-  morning_survey: `SELECT ms.id, ms.survey_date, ms.start_time, ms.end_time, b.name AS beach,
-                          ms.protected_nest_count, ms.notes
+  // The survey plus everything it was linked to, which is most of the form.
+  morning_survey: `SELECT ms.id,
+                          (to_jsonb(ms) || jsonb_build_object(
+                            'beach', b.name,
+                            'linked_nests', COALESCE((
+                              SELECT jsonb_agg(jsonb_build_object(
+                                'nest_code', tn.nest_code, 'date_found', tn.date_found,
+                                'total_num_eggs', tn.total_num_eggs, 'status', tn.status) ORDER BY tn.id)
+                              FROM morning_survey_nests msn JOIN turtle_nests tn ON tn.id = msn.nest_id
+                              WHERE msn.survey_id = ms.id
+                            ), '[]'::jsonb),
+                            'linked_emergences', COALESCE((
+                              SELECT jsonb_agg(jsonb_build_object(
+                                'beach', te.beach, 'event_date', te.event_date,
+                                'distance_to_sea_s', te.distance_to_sea_s) ORDER BY te.id)
+                              FROM morning_survey_emergences mse JOIN turtle_emergences te ON te.id = mse.emergence_id
+                              WHERE mse.survey_id = ms.id
+                            ), '[]'::jsonb)
+                          )) AS detail
                    FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
                    WHERE ms.id = ANY($1::int[]);`,
 };
@@ -3930,7 +3958,7 @@ const loadReviewDetails = async (byType) => {
     if (!sql) continue;
     try {
       const found = await db.query(sql, [ids]);
-      for (const row of found?.rows || []) details.set(`${type}:${row.id}`, row);
+      for (const row of found?.rows || []) details.set(`${type}:${row.id}`, row.detail ?? row);
     } catch (err) {
       console.error(`Could not load review detail for ${type}:`, err.message);
     }
@@ -3952,7 +3980,7 @@ const describeReviewedRecords = async (rows) => {
   const labels = new Map();
   for (const [type, ids] of byType) {
     const { table, describe } = REVIEWABLE[type];
-    // Table and column come from REVIEWABLE, never from the request, so they
+    // Table and expression come from REVIEWABLE, never from the request, so they
     // are safe to interpolate; the ids stay parameterised.
     const found = await db.query(
       `SELECT id, ${describe} AS label FROM ${table} WHERE id = ANY($1::int[]);`,
