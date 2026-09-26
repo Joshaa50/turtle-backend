@@ -920,6 +920,172 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
+// Nest photos
+//--------------------------------------------------------------
+// The only images a nest could carry were the two triangulation shots and a
+// track sketch - all three for relocating the nest, none for documenting it.
+// A team needs to show a cage in place, predation damage, or an excavation,
+// and "there is a photo somewhere in someone's phone" is not a record.
+//
+// Their own table rather than more columns on nests: a nest accumulates
+// photos across a season, and the list has to be readable without dragging
+// every image with it.
+
+// Stored in the row like the triangulation photos already are, so the cap is
+// what keeps the table sane. The client downscales before sending; this is the
+// backstop for anything that does not.
+const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS nest_photos (
+          id           SERIAL PRIMARY KEY,
+          nest_id      INTEGER     NOT NULL,
+          image        BYTEA       NOT NULL,
+          mime_type    TEXT        NOT NULL,
+          caption      TEXT,
+          taken_at     DATE,
+          uploaded_by  TEXT,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      await db.query(
+        "CREATE INDEX IF NOT EXISTS nest_photos_by_nest ON nest_photos (nest_id, created_at DESC);"
+      );
+      console.log("nest_photos is present.");
+    } catch (err) {
+      console.error("Could not ensure nest_photos:", err.message);
+    }
+  })();
+}
+
+app.post("/nests/:nestId/photos", requireRole(...RECORDERS), async (req, res) => {
+  const { nestId } = req.params;
+  if (!/^\d+$/.test(nestId)) return res.status(400).json({ error: "nestId must be a number." });
+
+  const { image, mime_type, caption, taken_at } = req.body || {};
+  if (!image) return res.status(400).json({ error: "An image is required." });
+  if (!PHOTO_TYPES.has(mime_type)) {
+    return res.status(400).json({ error: "Photos must be JPEG, PNG or WebP." });
+  }
+
+  // Strip a data URL prefix if one came along, so the caller can send either.
+  const base64 = String(image).includes(",") ? String(image).split(",").pop() : String(image);
+  let buffer;
+  try {
+    buffer = Buffer.from(base64, "base64");
+  } catch {
+    return res.status(400).json({ error: "That image could not be read." });
+  }
+  if (buffer.length === 0) return res.status(400).json({ error: "That image is empty." });
+  if (buffer.length > MAX_PHOTO_BYTES) {
+    return res.status(413).json({
+      error: `Photos must be under ${Math.round(MAX_PHOTO_BYTES / 1024 / 1024)}MB once resized.`,
+    });
+  }
+
+  try {
+    const nest = await db.query("SELECT id, nest_code FROM turtle_nests WHERE id = $1 LIMIT 1;", [nestId]);
+    if (nest.rows.length === 0) return res.status(404).json({ error: "Nest not found." });
+
+    const result = await db.query(
+      `INSERT INTO nest_photos (nest_id, image, mime_type, caption, taken_at, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, nest_id, mime_type, caption, taken_at, uploaded_by, created_at;`,
+      [nestId, buffer, mime_type, caption || null, taken_at || null, req.user?.email || null]
+    );
+
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: Number(nestId),
+      action: "updated",
+      req,
+      summary: `Photo added to nest ${nest.rows[0].nest_code}`,
+    });
+
+    res.status(201).json({
+      message: "Photo added successfully",
+      photo: { ...result.rows[0], size_bytes: buffer.length },
+    });
+  } catch (err) {
+    console.error("Add nest photo error:", err);
+    res.status(500).json({ error: "Server error while saving the photo." });
+  }
+});
+
+// Metadata only. Returning the images inline would make opening a nest with a
+// season of photos download every one of them.
+app.get("/nests/:nestId/photos", async (req, res) => {
+  const { nestId } = req.params;
+  if (!/^\d+$/.test(nestId)) return res.status(400).json({ error: "nestId must be a number." });
+
+  try {
+    const result = await db.query(
+      `SELECT id, nest_id, mime_type, caption, taken_at, uploaded_by, created_at,
+              octet_length(image) AS size_bytes
+       FROM nest_photos WHERE nest_id = $1
+       ORDER BY created_at DESC;`,
+      [nestId]
+    );
+    res.json({ nest_id: Number(nestId), photos: result.rows });
+  } catch (err) {
+    console.error("List nest photos error:", err);
+    res.status(500).json({ error: "Server error while listing photos." });
+  }
+});
+
+app.get("/nest-photos/:photoId", async (req, res) => {
+  const { photoId } = req.params;
+  if (!/^\d+$/.test(photoId)) return res.status(400).json({ error: "photoId must be a number." });
+
+  try {
+    const result = await db.query(
+      "SELECT image, mime_type FROM nest_photos WHERE id = $1 LIMIT 1;",
+      [photoId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Photo not found." });
+
+    const { image, mime_type } = result.rows[0];
+    // Served as bytes rather than base64 JSON: it halves the transfer and lets
+    // the browser cache it like any other image.
+    res.setHeader("Content-Type", mime_type);
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.send(image);
+  } catch (err) {
+    console.error("Get nest photo error:", err);
+    res.status(500).json({ error: "Server error while fetching the photo." });
+  }
+});
+
+app.delete("/nest-photos/:photoId", requireRole(...REVIEWERS), async (req, res) => {
+  const { photoId } = req.params;
+  if (!/^\d+$/.test(photoId)) return res.status(400).json({ error: "photoId must be a number." });
+
+  try {
+    const result = await db.query(
+      "DELETE FROM nest_photos WHERE id = $1 RETURNING id, nest_id, caption;",
+      [photoId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Photo not found." });
+
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: result.rows[0].nest_id,
+      action: "updated",
+      req,
+      summary: `Photo removed${result.rows[0].caption ? ` ("${result.rows[0].caption}")` : ""}`,
+    });
+
+    res.json({ message: "Photo deleted successfully", deleted: result.rows[0] });
+  } catch (err) {
+    console.error("Delete nest photo error:", err);
+    res.status(500).json({ error: "Server error while deleting the photo." });
+  }
+});
+
 // Subject access and erasure
 //--------------------------------------------------------------
 // PRIVACY.md said plainly that neither existed. A conservation project holds
