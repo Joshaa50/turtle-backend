@@ -71,6 +71,12 @@ const run = async () => {
   const pendingBefore = (await (await fetch(`${API}/reviews?status=pending`, { headers: cAuth })).json()).reviews || [];
   console.log(`  ${pendingBefore.length} pending now`);
 
+  // Re-running must not pile more work onto a queue that already has some.
+  // The timetable step refuses the same way; this one used to just add three
+  // more every time it ran.
+  if (pendingBefore.length > 0 && !FORCE) {
+    console.log('  already has pending items — skipping (pass --force to add anyway)');
+  } else
   for (const [i, e] of EMERGENCES.entries()) {
     const { lat, lon } = COORD(i + 3);
     const body = {
@@ -85,6 +91,69 @@ const run = async () => {
     const res = await fetch(`${API}/emergences`, { method: 'POST', headers: hdrs(volToken), body: JSON.stringify(body) });
     console.log(res.ok ? `  OK   ${desc}` : `  FAIL ${desc} — ${res.status} ${await res.text()}`);
   }
+
+  // ---- Turtle encounters --------------------------------------------------
+  // Without these every turtle page reads "Total sightings 0 / First observed
+  // N/A" with an empty event history and empty growth analytics - so the
+  // mark-recapture side of the app, which is the point of tagging, demos as
+  // though it does not exist. Two encounters per animal, months apart, is the
+  // minimum that lets a growth trend be drawn at all.
+  console.log(`\n— Turtle encounters —`);
+
+  const turtles = (await (await fetch(`${API}/turtles`, { headers: cAuth })).json()).turtles || [];
+  const needEncounters = turtles.filter((t) => Number(t.sighting_count || 0) === 0 && !t.is_archived);
+  console.log(`  ${turtles.length} turtles, ${needEncounters.length} with no encounter on record`);
+
+  const BEACHES = ['Loggos 2', 'Xi', 'Vatsa', 'Agios Ioannis', 'Megas Lakkos'];
+  const OBSERVERS = ['Elena Papadaki', 'Nikos Floros', 'Sofia Manthou'];
+
+  // A season's growth for a mature Mediterranean loggerhead is millimetres, not
+  // centimetres - an animal that gained 4cm between sightings would be flagged
+  // by the auditor, and rightly.
+  const GROWTH_CM = 0.4;
+
+  let encounterPlan = [];
+  for (const [i, t] of needEncounters.entries()) {
+    const first = addDays(new Date(), -(120 + (i * 7) % 60));  // last season
+    const second = addDays(new Date(), -(20 + (i * 5) % 40));  // this one
+    const base = Number(t.ccl_max) || 82;
+
+    encounterPlan.push(
+      { turtle: t, date: iso(first),  ccl: (base - GROWTH_CM).toFixed(1), type: 'Nesting',  beach: BEACHES[i % BEACHES.length] },
+      { turtle: t, date: iso(second), ccl: base.toFixed(1),               type: 'Nesting',  beach: BEACHES[(i + 2) % BEACHES.length] },
+    );
+  }
+
+  for (const e of encounterPlan) {
+    const who = e.turtle.name || `turtle ${e.turtle.id}`;
+    const desc = `${who.padEnd(12)} ${e.date}  ${e.beach.padEnd(15)} CCL ${e.ccl}cm`;
+    if (!CONFIRM) { console.log(`  DRY  ${desc}`); continue; }
+
+    const res = await fetch(`${API}/turtle_survey_events/create`, {
+      method: 'POST', headers: cAuth,
+      body: JSON.stringify({
+        turtle_id: e.turtle.id,
+        event_date: e.date,
+        event_type: e.type,
+        location: e.beach,
+        observer: OBSERVERS[Number(e.turtle.id) % OBSERVERS.length],
+        // Carried forward so the encounter shows the tags the animal wore
+        // that day, which is what a recapture record is for.
+        front_left_tag: e.turtle.front_left_tag || null,
+        front_left_address: e.turtle.front_left_address || null,
+        front_right_tag: e.turtle.front_right_tag || null,
+        front_right_address: e.turtle.front_right_address || null,
+        ccl_max: e.ccl,
+        ccl_min: (Number(e.ccl) - 0.8).toFixed(1),
+        scl_max: e.turtle.scl_max ?? null,
+        ccw: e.turtle.ccw ?? null,
+        health_condition: e.turtle.health_condition || 'Healthy',
+      }),
+    });
+    console.log(res.ok ? `  OK   ${desc}` : `  FAIL ${desc} — ${res.status} ${await res.text()}`);
+  }
+
+  if (!CONFIRM && encounterPlan.length === 0) console.log('  nothing to add — every turtle already has encounters');
 
   // ---- Time table ---------------------------------------------------------
   console.log(`\n— Time table (week of ${iso(WEEK_START)}) —`);
