@@ -1049,8 +1049,9 @@ app.get("/nest-photos/:photoId", async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: "Photo not found." });
 
     const { image, mime_type } = result.rows[0];
-    // Served as bytes rather than base64 JSON: it halves the transfer and lets
-    // the browser cache it like any other image.
+    // Served as bytes rather than base64 JSON, which roughly halves the
+    // transfer. The route is authenticated, so the client fetches it and makes
+    // an object URL - an <img src> would send no Authorization header.
     res.setHeader("Content-Type", mime_type);
     res.setHeader("Cache-Control", "private, max-age=86400");
     res.send(image);
