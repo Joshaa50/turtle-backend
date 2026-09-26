@@ -10,7 +10,8 @@
     "start": "node server.js",
     "qa:cleanup": "node scripts/qa-cleanup.mjs",
     "qa:seed": "node scripts/qa-seed.mjs",
-    "qa:audit": "node scripts/qa-cleanup.mjs --audit"
+    "qa:audit": "node scripts/qa-cleanup.mjs --audit",
+    "demo:tidy": "node scripts/demo-tidy.mjs"
   },
   "keywords": [],
   "author": "",
