@@ -1612,9 +1612,207 @@ if (require.main === module) {
   })();
 }
 
-// A volunteer's write is held for review; everyone else's is already reviewed
-// fieldwork by virtue of who recorded it.
-const needsReview = (req) => req.user?.role === VOLUNTEER;
+//--------------------------------------------------------------
+// Project settings
+//
+// Things a Project Coordinator decides for their site - the nesting seasons and
+// who has to be reviewed - rather than constants in this file. One key/value
+// table keeps each new setting additive, and every reader falls back to the
+// behaviour the app had before the setting existed, so an unconfigured project
+// (or a settings table that is briefly unreachable) works exactly as it did.
+//--------------------------------------------------------------
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key        TEXT PRIMARY KEY,
+          value      JSONB       NOT NULL,
+          updated_by INTEGER,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      console.log("app_settings is present.");
+    } catch (err) {
+      console.error("Could not ensure app_settings:", err.message);
+    }
+  })();
+}
+
+const ALL_ROLES = [COORDINATOR, LEADER, "Field Assistant", VOLUNTEER];
+
+// Read through the pool, never a caller's transaction client: a missing table
+// inside an open transaction would abort the whole transaction, and a setting
+// must never be able to fail a save.
+const readSetting = async (key) => {
+  try {
+    const result = await db.query("SELECT value FROM app_settings WHERE key = $1;", [key]);
+    const value = result?.rows?.[0]?.value;
+    return value && typeof value === "object" ? value : null;
+  } catch (err) {
+    console.error(`Could not read setting ${key}:`, err.message);
+    return null;
+  }
+};
+
+// Review rules: which roles have their records held for a Field Leader, per
+// record type. The default is what the app always did - Field Volunteers, every type.
+const defaultReviewRules = () => ({
+  record_types: Object.fromEntries(Object.keys(REVIEWABLE).map((t) => [t, [VOLUNTEER]])),
+  auto_approve_days: null,
+});
+
+const getReviewRules = async () => {
+  const rules = defaultReviewRules();
+  const stored = await readSetting("review_rules");
+  if (!stored) return rules;
+  for (const type of Object.keys(rules.record_types)) {
+    const roles = stored.record_types?.[type];
+    if (Array.isArray(roles)) rules.record_types[type] = roles.filter((r) => ALL_ROLES.includes(r));
+  }
+  const days = stored.auto_approve_days;
+  rules.auto_approve_days = Number.isInteger(days) && days > 0 ? days : null;
+  return rules;
+};
+
+const readReviewRulesBody = (body) => {
+  const types = body?.record_types;
+  if (!types || typeof types !== "object" || Array.isArray(types)) {
+    return { error: "record_types is required." };
+  }
+  const record_types = {};
+  for (const type of Object.keys(REVIEWABLE)) {
+    const roles = types[type];
+    if (!Array.isArray(roles) || roles.some((r) => !ALL_ROLES.includes(r))) {
+      return { error: `record_types.${type} must be a list of valid roles.` };
+    }
+    record_types[type] = [...new Set(roles)];
+  }
+  const raw = body.auto_approve_days;
+  let auto_approve_days = null;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    auto_approve_days = Number(raw);
+    if (!Number.isInteger(auto_approve_days) || auto_approve_days < 1 || auto_approve_days > 90) {
+      return { error: "auto_approve_days must be a whole number of days from 1 to 90, or empty." };
+    }
+  }
+  return { value: { record_types, auto_approve_days } };
+};
+
+// Seasons: named date ranges. Matching is by date, not calendar year, so a
+// season that crosses New Year (a southern-hemisphere November to April) works.
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const isRealDay = (v) => ISO_DAY.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) &&
+  new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v;
+
+const getSeasons = async () => {
+  const stored = await readSetting("seasons");
+  const seasons = Array.isArray(stored?.seasons) ? stored.seasons : [];
+  const current = seasons.some((s) => s.id === stored?.current) ? stored.current : null;
+  return { seasons, current };
+};
+
+const readSeasonsBody = (body) => {
+  if (!Array.isArray(body?.seasons)) return { error: "seasons must be a list." };
+  if (body.seasons.length > 50) return { error: "No more than 50 seasons." };
+  const seasons = [];
+  for (const s of body.seasons) {
+    const name = String(s?.name ?? "").trim();
+    if (!name || name.length > 40) return { error: "Each season needs a name of up to 40 characters." };
+    if (!isRealDay(s?.start) || !isRealDay(s?.end)) {
+      return { error: `Season ${name} needs a real start and end date.` };
+    }
+    if (s.start > s.end) return { error: `Season ${name} ends before it starts.` };
+    seasons.push({ id: String(s.id || name).trim().slice(0, 60), name, start: s.start, end: s.end });
+  }
+  if (new Set(seasons.map((s) => s.id)).size !== seasons.length) {
+    return { error: "Two seasons share a name." };
+  }
+  const sorted = [...seasons].sort((a, b) => a.start.localeCompare(b.start));
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].start <= sorted[i - 1].end) {
+      return { error: `Seasons ${sorted[i - 1].name} and ${sorted[i].name} overlap.` };
+    }
+  }
+  const current = body.current ?? null;
+  if (current !== null && !seasons.some((s) => s.id === current)) {
+    return { error: "current must be one of the seasons." };
+  }
+  return { value: { seasons, current } };
+};
+
+// A date outside every configured season is worth a word, not a refusal: a late
+// nest and an off-season stranding are both real observations. Null when there
+// is nothing to say, including when no seasons are configured.
+const seasonWarning = async (date) => {
+  try {
+    const day = String(date ?? "").slice(0, 10);
+    if (!ISO_DAY.test(day)) return null;
+    const { seasons } = await getSeasons();
+    if (seasons.length === 0) return null;
+    if (seasons.some((s) => day >= s.start && day <= s.end)) return null;
+    return `${day} is outside every configured season (${seasons.map((s) => s.name).join(", ")}). It was saved - check the date.`;
+  } catch (err) {
+    return null;
+  }
+};
+
+app.get("/settings", async (req, res) => {
+  try {
+    res.json({ seasons: await getSeasons(), review_rules: await getReviewRules() });
+  } catch (err) {
+    console.error("Get settings error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+const saveSetting = (key, read, after) => async (req, res) => {
+  const parsed = read(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  try {
+    await db.query(
+      `INSERT INTO app_settings (key, value, updated_by, updated_at)
+       VALUES ($1, $2::jsonb, $3, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW();`,
+      [key, JSON.stringify(parsed.value), req.user?.id ?? null]
+    );
+    console.log(`Setting ${key} changed by ${req.user?.email}.`);
+    res.json(await after());
+  } catch (err) {
+    console.error(`Save setting ${key} error:`, err);
+    res.status(500).json({ error: "Server error while saving the setting." });
+  }
+};
+
+app.put("/settings/seasons", requireRole(COORDINATOR), saveSetting("seasons", readSeasonsBody, async () => ({ seasons: await getSeasons() })));
+app.put("/settings/review-rules", requireRole(COORDINATOR), saveSetting("review_rules", readReviewRulesBody, async () => ({ review_rules: await getReviewRules() })));
+
+// Whether this person's record of this type is held for a Field Leader. Only
+// ever affects records saved afterwards - what is already queued stays queued.
+const needsReview = async (recordType, req) => {
+  const role = req.user?.role;
+  if (!role) return false;
+  const rules = await getReviewRules();
+  return rules.record_types[recordType]?.includes(role) ?? false;
+};
+
+// Pending records older than the configured limit are approved on the spot,
+// when the queue is next read - no scheduler to run or to fail. reviewed_by is
+// left empty, which is how the screens tell this from a person's decision.
+const applyAutoApprove = async () => {
+  try {
+    const days = (await getReviewRules()).auto_approve_days;
+    if (!days) return;
+    await db.query(
+      `UPDATE record_reviews
+       SET status = 'approved', reviewed_by = NULL, reviewed_at = NOW(), review_note = $2
+       WHERE status = 'pending' AND submitted_at < NOW() - ($1::int * INTERVAL '1 day');`,
+      [days, `Auto-approved after ${days} days without review.`]
+    );
+  } catch (err) {
+    console.error("Auto-approve failed:", err.message);
+  }
+};
 
 // Queues one record for review. `executor` is the pool or an open transaction
 // client, so a route that already runs in a transaction enrols the review row
@@ -1623,7 +1821,7 @@ const needsReview = (req) => req.user?.role === VOLUNTEER;
 // ON CONFLICT DO NOTHING because re-submitting an already-queued record must
 // not reset a decision a reviewer has already made.
 const queueReview = async (executor, recordType, recordId, req) => {
-  if (!needsReview(req) || recordId == null) return null;
+  if (recordId == null || !(await needsReview(recordType, req))) return null;
   const result = await executor.query(
     `INSERT INTO record_reviews (record_type, record_id, submitted_by)
      VALUES ($1, $2, $3)
@@ -2305,7 +2503,8 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
       message: "Nest and emergence created successfully",
       nest: nestResult.rows[0],
       emergence_id,
-      review
+      review,
+      season_warning: await seasonWarning(date_found)
     });
 
   } catch (err) {
@@ -2998,7 +3197,8 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
     res.status(201).json({
       message: "Emergence recorded successfully",
       emergence: result.rows[0],
-      review
+      review,
+      season_warning: await seasonWarning(event_date)
     });
   } catch (err) {
     console.error("Create emergence error:", err);
@@ -4020,6 +4220,7 @@ app.get("/reviews", requireRole(...REVIEWERS), async (req, res) => {
     if (!["pending", "approved", "rejected", "all"].includes(status)) {
       return res.status(400).json({ error: "status must be pending, approved, rejected or all." });
     }
+    await applyAutoApprove();
 
     const result = await db.query(
       `${REVIEW_SELECT}
@@ -4040,6 +4241,7 @@ app.get("/reviews", requireRole(...REVIEWERS), async (req, res) => {
 // without being able to read anyone else's queue.
 app.get("/reviews/mine", async (req, res) => {
   try {
+    await applyAutoApprove();
     const result = await db.query(
       `${REVIEW_SELECT} WHERE r.submitted_by = $1 ORDER BY r.submitted_at DESC LIMIT 200;`,
       [req.user.id]
