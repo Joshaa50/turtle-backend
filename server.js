@@ -1464,6 +1464,11 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    const notInList = await listError(req.body);
+    if (notInList) {
+      return res.status(400).json({ error: notInList });
+    }
+
     const sql = `
       INSERT INTO turtles (
         name,
@@ -1605,6 +1610,22 @@ if (require.main === module) {
       await db.query(
         "CREATE INDEX IF NOT EXISTS record_reviews_status_idx ON record_reviews (status);"
       );
+      // Alerts: a volunteer is told once when their record is approved or sent
+      // back, and anyone acknowledging it clears it for everyone. The backfill
+      // runs only when the column is first created, so decisions made before
+      // alerts existed do not all arrive as news.
+      const hadAck = await db.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'record_reviews' AND column_name = 'acknowledged_at';`
+      );
+      await db.query("ALTER TABLE record_reviews ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;");
+      await db.query("ALTER TABLE record_reviews ADD COLUMN IF NOT EXISTS acknowledged_by INTEGER;");
+      if (hadAck.rows.length === 0) {
+        await db.query(
+          `UPDATE record_reviews SET acknowledged_at = COALESCE(reviewed_at, NOW())
+           WHERE status <> 'pending' AND acknowledged_at IS NULL;`
+        );
+      }
       console.log("record_reviews is present.");
     } catch (err) {
       console.error("Could not ensure record_reviews:", err.message);
@@ -1757,9 +1778,123 @@ const seasonWarning = async (date) => {
   }
 };
 
+// Dropdown lists. Only the ones nothing branches on: species and health
+// condition. Nest status and event types drive the lifecycle and hatch tallies,
+// so they stay in code. An item can be retired but never removed, so records
+// that already hold it still read correctly.
+const defaultLists = () => ({
+  species: [
+    { value: "Caretta caretta", label: "Loggerhead (Caretta caretta)", active: true },
+    { value: "Chelonia mydas", label: "Green (Chelonia mydas)", active: true },
+  ],
+  health_conditions: [
+    { value: "Healthy", concerning: false, active: true },
+    { value: "Lethargic", concerning: false, active: true },
+    { value: "Injured", concerning: true, active: true },
+    { value: "Dead", concerning: false, active: true },
+  ],
+});
+
+const readList = (raw, kind) => {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const item of raw) {
+    const value = String(item?.value ?? "").trim();
+    if (!value || value.length > 60) return null;
+    const entry = { value, active: item?.active !== false };
+    if (kind === "species") entry.label = String(item?.label ?? "").trim().slice(0, 80) || value;
+    else entry.concerning = item?.concerning === true;
+    out.push(entry);
+  }
+  return out;
+};
+
+const getLists = async () => {
+  const lists = defaultLists();
+  const stored = await readSetting("lists");
+  if (!stored) return lists;
+  const species = readList(stored.species, "species");
+  const health = readList(stored.health_conditions, "health");
+  if (species && species.length) lists.species = species;
+  if (health && health.length) lists.health_conditions = health;
+  return lists;
+};
+
+const readListsBody = (body) => {
+  const out = {};
+  for (const [key, kind, name] of [["species", "species", "Species"], ["health_conditions", "health", "Health conditions"]]) {
+    const items = readList(body?.[key], kind);
+    if (!items) return { error: `${name} must be a list of named options (up to 60 characters each).` };
+    if (items.length > 50) return { error: `${name} can have at most 50 options.` };
+    const seen = new Set(items.map((i) => i.value.toLowerCase()));
+    if (seen.size !== items.length) return { error: `${name} has the same option twice.` };
+    if (!items.some((i) => i.active)) return { error: `${name} needs at least one option in use.` };
+    out[key] = items;
+  }
+  return { value: out };
+};
+
+// New values must come from the lists once a coordinator has set them up. A
+// value the record already holds stays editable, so an old free-text species
+// does not block saving a fresh measurement. Until lists are configured the
+// API accepts anything, as it always did.
+const listError = async (body, getCurrent = async () => ({})) => {
+  if (!(await readSetting("lists"))) return null;
+  const lists = await getLists();
+  let current = null;
+  const check = async (field, items, label) => {
+    const v = body[field];
+    if (v === null || v === undefined || v === "") return null;
+    if (items.some((i) => i.active && i.value.toLowerCase() === String(v).toLowerCase())) return null;
+    current = current ?? (await getCurrent());
+    if (current?.[field] != null && String(current[field]).toLowerCase() === String(v).toLowerCase()) return null;
+    return `${label} "${v}" is not one of the configured options.`;
+  };
+  return (await check("species", lists.species, "Species")) ||
+    (await check("health_condition", lists.health_conditions, "Health condition"));
+};
+
+// Alerts: derived from the review queue when read, so there is nothing to keep
+// in step. Leaders and coordinators are told what waits for them; anyone who
+// submitted a record is told when it was approved or sent back.
+const DEFAULT_ALERTS = {
+  reviewer_pending: { enabled: true, after_hours: 0 },
+  submitter_feedback: { enabled: true },
+};
+
+const getAlertSettings = async () => {
+  const stored = await readSetting("alerts");
+  const hours = stored?.reviewer_pending?.after_hours;
+  return {
+    reviewer_pending: {
+      enabled: stored?.reviewer_pending?.enabled !== false,
+      after_hours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_ALERTS.reviewer_pending.after_hours,
+    },
+    submitter_feedback: { enabled: stored?.submitter_feedback?.enabled !== false },
+  };
+};
+
+const readAlertsBody = (body) => {
+  const rp = body?.reviewer_pending;
+  const sf = body?.submitter_feedback;
+  if (typeof rp?.enabled !== "boolean" || typeof sf?.enabled !== "boolean") {
+    return { error: "Each alert needs to be switched on or off." };
+  }
+  const hours = Number(rp.after_hours ?? 0);
+  if (!Number.isInteger(hours) || hours < 0 || hours > 720) {
+    return { error: "after_hours must be a whole number of hours from 0 to 720." };
+  }
+  return { value: { reviewer_pending: { enabled: rp.enabled, after_hours: hours }, submitter_feedback: { enabled: sf.enabled } } };
+};
+
 app.get("/settings", async (req, res) => {
   try {
-    res.json({ seasons: await getSeasons(), review_rules: await getReviewRules() });
+    res.json({
+      seasons: await getSeasons(),
+      review_rules: await getReviewRules(),
+      lists: await getLists(),
+      alerts: await getAlertSettings(),
+    });
   } catch (err) {
     console.error("Get settings error:", err);
     res.status(500).json({ error: "Server error." });
@@ -1785,6 +1920,8 @@ const saveSetting = (key, read, after) => async (req, res) => {
 };
 
 app.put("/settings/seasons", requireRole(COORDINATOR), saveSetting("seasons", readSeasonsBody, async () => ({ seasons: await getSeasons() })));
+app.put("/settings/lists", requireRole(COORDINATOR), saveSetting("lists", readListsBody, async () => ({ lists: await getLists() })));
+app.put("/settings/alerts", requireRole(COORDINATOR), saveSetting("alerts", readAlertsBody, async () => ({ alerts: await getAlertSettings() })));
 app.put("/settings/review-rules", requireRole(COORDINATOR), saveSetting("review_rules", readReviewRulesBody, async () => ({ review_rules: await getReviewRules() })));
 
 // Whether this person's record of this type is held for a Field Leader. Only
@@ -2001,6 +2138,13 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
     const rangeError = outOfRange(req.body, TURTLE_RANGES);
     if (rangeError) {
       return res.status(400).json({ error: rangeError });
+    }
+
+    const notInList = await listError(req.body, async () =>
+      (await db.query("SELECT species, health_condition FROM turtles WHERE id = $1 LIMIT 1;", [id])).rows[0] || {}
+    );
+    if (notInList) {
+      return res.status(400).json({ error: notInList });
     }
 
     const sql = `
@@ -4169,7 +4313,7 @@ const loadReviewDetails = async (byType) => {
 // Resolves review rows to a short description of the record each one points at.
 // One query per record type present, rather than a five-way LEFT JOIN that
 // would be unreadable and mostly NULL.
-const describeReviewedRecords = async (rows) => {
+const describeReviewedRecords = async (rows, { detail = true } = {}) => {
   const byType = new Map();
   for (const r of rows) {
     if (!REVIEWABLE[r.record_type]) continue;
@@ -4189,7 +4333,7 @@ const describeReviewedRecords = async (rows) => {
     for (const row of found.rows) labels.set(`${type}:${row.id}`, row.label);
   }
 
-  const details = await loadReviewDetails(byType);
+  const details = detail ? await loadReviewDetails(byType) : new Map();
 
   return rows.map((r) => ({
     ...r,
@@ -4320,6 +4464,90 @@ app.delete("/reviews/:id", requireRole(...REVIEWERS), async (req, res) => {
 
 
 app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
+
+// What needs this person's attention. Nothing is stored per alert: pending
+// reviews are alerts until someone decides them, and a decision on your own
+// record is an alert until it is acknowledged. Acknowledgement is shared - one
+// person clearing it clears it for everyone who could see it.
+app.get("/alerts", async (req, res) => {
+  try {
+    await applyAutoApprove();
+    const settings = await getAlertSettings();
+    const isReviewer = REVIEWERS.includes(req.user?.role);
+    const alerts = [];
+    const name = (r) => [r.submitted_by_first_name, r.submitted_by_last_name].filter(Boolean).join(" ") || "A team member";
+    const what = (r) => `${r.record_kind}${r.record_label ? ` ${r.record_label}` : ""}`;
+
+    if (isReviewer && settings.reviewer_pending.enabled) {
+      const pending = await db.query(
+        `${REVIEW_SELECT}
+         WHERE r.status = 'pending' AND r.submitted_at <= NOW() - ($1::int * INTERVAL '1 hour')
+         ORDER BY r.submitted_at DESC LIMIT 50;`,
+        [settings.reviewer_pending.after_hours]
+      );
+      for (const r of await describeReviewedRecords(pending.rows, { detail: false })) {
+        if (r.record_missing) continue;
+        alerts.push({
+          id: `review-${r.id}`, review_id: r.id, kind: "review_pending",
+          title: "Waiting for your review",
+          message: `${what(r)} from ${name(r)}`,
+          at: r.submitted_at, can_acknowledge: false,
+        });
+      }
+    }
+
+    if (settings.submitter_feedback.enabled) {
+      const decided = await db.query(
+        `${REVIEW_SELECT}
+         WHERE r.submitted_by = $1 AND r.status IN ('approved', 'rejected') AND r.acknowledged_at IS NULL
+         ORDER BY r.reviewed_at DESC NULLS LAST LIMIT 50;`,
+        [req.user.id]
+      );
+      for (const r of await describeReviewedRecords(decided.rows, { detail: false })) {
+        if (r.record_missing || !["approved", "rejected"].includes(r.status)) continue;
+        const rejected = r.status === "rejected";
+        alerts.push({
+          id: `review-${r.id}`, review_id: r.id,
+          kind: rejected ? "review_rejected" : "review_approved",
+          title: rejected ? "Needs correction" : "Approved",
+          message: rejected
+            ? `${what(r)} was sent back${r.review_note ? `: ${r.review_note}` : "."}`
+            : `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
+          at: r.reviewed_at, can_acknowledge: true,
+        });
+      }
+    }
+
+    alerts.sort((a, b) => new Date(b.at) - new Date(a.at));
+    res.json({ alerts });
+  } catch (err) {
+    console.error("Get alerts error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+app.post("/alerts/:id/acknowledge", async (req, res) => {
+  try {
+    const reviewId = Number.parseInt(String(req.params.id).replace(/^review-/, ""), 10);
+    if (!Number.isInteger(reviewId)) return res.status(400).json({ error: "Unknown alert." });
+    // The submitter, or a reviewer on their behalf (shared acknowledgement).
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET acknowledged_at = NOW(), acknowledged_by = $2
+       WHERE id = $1 AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+         AND (submitted_by = $2 OR $3::boolean)
+       RETURNING id;`,
+      [reviewId, req.user.id, REVIEWERS.includes(req.user.role)]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "That alert is already cleared, or is not yours to clear." });
+    }
+    res.json({ message: "Alert cleared.", id: result.rows[0].id });
+  } catch (err) {
+    console.error("Acknowledge alert error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
 
 app.post("/ai/nest-query", async (req, res) => {
   try {
