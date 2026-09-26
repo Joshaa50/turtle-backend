@@ -42,6 +42,7 @@ const PUBLIC_ROUTES = [
   "POST /users/login",
   "POST /users/register",
   "GET /public/stats",
+  "GET /public/stations",
   "GET /demo/accounts",
   "POST /demo/login",
 ];
@@ -2859,8 +2860,11 @@ app.get("/beaches", async (req, res) => {
 // Beaches, their survey areas and their station names were fixed rows loaded
 // once for one project on Kefalonia. Another organisation could not add its
 // own sites without someone editing the database by hand, which made the app
-// impossible to adopt without its developer. Coordinators and leaders manage
-// them here instead.
+// impossible to adopt without its developer.
+//
+// Coordinator only. This is project configuration rather than fieldwork:
+// everyone else picks a beach and a station from the list, and the list itself
+// should not move under a team mid-season.
 
 const BEACH_CODE_RE = /^[A-Z0-9]{1,8}$/;
 
@@ -2883,7 +2887,7 @@ const readBeachBody = (body) => {
   return { value: { name, code, station, survey_area } };
 };
 
-app.post("/beaches", requireRole(COORDINATOR, LEADER), async (req, res) => {
+app.post("/beaches", requireRole(COORDINATOR), async (req, res) => {
   const parsed = readBeachBody(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
 
@@ -2904,7 +2908,7 @@ app.post("/beaches", requireRole(COORDINATOR, LEADER), async (req, res) => {
   }
 });
 
-app.patch("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+app.patch("/beaches/:id", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
 
   // is_active on its own is the "retire this beach" path and skips the
@@ -2953,7 +2957,7 @@ app.patch("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) => 
 // list tidy. Retiring it hides it from the pickers and keeps the history
 // readable - the same reasoning as deactivating a user rather than deleting
 // them.
-app.delete("/beaches/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+app.delete("/beaches/:id", requireRole(COORDINATOR), async (req, res) => {
   res.status(405).json({
     error: "Beaches are retired, not deleted, so the records made at them stay readable. Set is_active to false instead.",
   });
@@ -2993,6 +2997,23 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
   } catch (err) {
     console.error("Get audit trail error:", err);
     res.status(500).json({ error: "Server error while fetching the audit trail." });
+  }
+});
+
+// The station names, readable without a token because the sign-up form needs
+// them before an account exists. Names only - nothing here says where a beach
+// is or what is nesting on it.
+app.get("/public/stations", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT DISTINCT station FROM beaches
+       WHERE station IS NOT NULL AND station <> '' AND is_active = true
+       ORDER BY station;`
+    );
+    res.json({ stations: result.rows.map((r) => r.station) });
+  } catch (err) {
+    console.error("Get public stations error:", err);
+    res.status(500).json({ error: "Server error while fetching stations." });
   }
 });
 

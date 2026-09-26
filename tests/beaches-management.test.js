@@ -20,15 +20,25 @@ const valid = { name: 'Skala North', code: 'SKN', station: 'East', survey_area: 
 // organisation could add its own sites without editing the database by hand.
 describe('beach management', () => {
   describe('who may change the site list', () => {
-    it.each(['Field Volunteer', 'Field Assistant'])('refuses %s', async (role) => {
+    // Configuration, not fieldwork: a field leader runs the season, but the
+    // shape of the project should not move under their team mid-season.
+    it.each(['Field Volunteer', 'Field Assistant', 'Field Leader'])('refuses %s', async (role) => {
       const res = await request(app).post('/beaches').set('Authorization', `Bearer ${tokenFor(role)}`).send(valid);
       expect(res.status).toBe(403);
       expect(query).not.toHaveBeenCalled();
     });
 
-    it.each(['Project Coordinator', 'Field Leader'])('allows %s', async (role) => {
+    it.each([
+      ['POST', () => request(app).post('/beaches').send(valid)],
+      ['PATCH', () => request(app).patch('/beaches/3').send(valid)],
+    ])('refuses a field leader on %s too', async (_m, call) => {
+      const res = await call().set('Authorization', `Bearer ${tokenFor('Field Leader')}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('allows a project coordinator', async () => {
       query.mockResolvedValue({ rows: [{ id: 14, ...valid, is_active: true }] });
-      const res = await request(app).post('/beaches').set('Authorization', `Bearer ${tokenFor(role)}`).send(valid);
+      const res = await request(app).post('/beaches').set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`).send(valid);
       expect(res.status).toBe(201);
     });
 
@@ -70,7 +80,7 @@ describe('beach management', () => {
   it.each([['name'], ['station'], ['survey_area']])('requires %s', async (field) => {
     const res = await request(app)
       .post('/beaches')
-      .set('Authorization', `Bearer ${tokenFor('Field Leader')}`)
+      .set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`)
       .send({ ...valid, [field]: '   ' });
     expect(res.status).toBe(400);
   });
@@ -79,7 +89,7 @@ describe('beach management', () => {
     query.mockResolvedValue({ rows: [{ id: 3, ...valid, is_active: false }] });
     const res = await request(app)
       .patch('/beaches/3')
-      .set('Authorization', `Bearer ${tokenFor('Field Leader')}`)
+      .set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`)
       .send({ is_active: false });
     expect(res.status).toBe(200);
     expect(res.body.beach.is_active).toBe(false);
@@ -98,9 +108,28 @@ describe('beach management', () => {
     query.mockResolvedValue({ rows: [] });
     const res = await request(app)
       .patch('/beaches/999')
-      .set('Authorization', `Bearer ${tokenFor('Field Leader')}`)
+      .set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`)
       .send(valid);
     expect(res.status).toBe(404);
+  });
+
+  it('serves the station names without a token, because sign-up needs them', async () => {
+    query.mockResolvedValue({ rows: [{ station: 'East' }, { station: 'West' }] });
+    const res = await request(app).get('/public/stations');
+    expect(res.status).toBe(200);
+    expect(res.body.stations).toEqual(['East', 'West']);
+    // Names only - nothing that says where a beach is or what is nesting on it.
+    expect(JSON.stringify(res.body)).not.toMatch(/lat|long|code/i);
+  });
+
+  it('does not open its neighbours: /beaches and /beaches/groupings still need a token', async () => {
+    // Auth here is default-closed, so a new entry in PUBLIC_ROUTES is the kind
+    // of change that can quietly widen more than it meant to.
+    for (const path of ['/beaches', '/beaches/groupings']) {
+      const res = await request(app).get(path);
+      expect(res.status, `${path} should still require a token`).toBe(401);
+    }
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('serves the stations and areas actually in use', async () => {
