@@ -3751,6 +3751,97 @@ app.get("/shifts", async (req, res) => {
   }
 });
 
+// Shift types a coordinator or Field Leader defines for their project - what
+// used to only be added directly in the database. shift_type stays a fixed
+// set rather than free text: DEFAULT_SHIFT_TIMES and the volunteer-hours
+// report on the frontend key off it. A shift with no end_time (an open-ended
+// morning survey) is allowed - the frontend already treats that as normal.
+const SHIFT_TYPES = ["Morning", "Afternoon", "Night", "All Day"];
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+
+const readShiftBody = (body) => {
+  const shift_name = String(body?.shift_name ?? "").trim();
+  const shift_type = String(body?.shift_type ?? "").trim();
+
+  if (!shift_name) return { error: "A shift needs a name." };
+  if (shift_name.length > 60) return { error: "The shift name is too long." };
+  if (!SHIFT_TYPES.includes(shift_type)) {
+    return { error: `shift_type must be one of: ${SHIFT_TYPES.join(", ")}.` };
+  }
+
+  const start_time = body?.start_time ? String(body.start_time).trim() : null;
+  const end_time = body?.end_time ? String(body.end_time).trim() : null;
+  if (start_time !== null && !TIME_RE.test(start_time)) {
+    return { error: "start_time must be HH:MM." };
+  }
+  if (end_time !== null && !TIME_RE.test(end_time)) {
+    return { error: "end_time must be HH:MM." };
+  }
+
+  return { value: { shift_name, shift_type, start_time, end_time } };
+};
+
+app.post("/shifts", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  const parsed = readShiftBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  try {
+    const result = await db.query(
+      `INSERT INTO shifts (shift_name, shift_type, start_time, end_time, is_active)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING *;`,
+      [parsed.value.shift_name, parsed.value.shift_type, parsed.value.start_time, parsed.value.end_time]
+    );
+    res.status(201).json({ message: "Shift created successfully", shift: result.rows[0] });
+  } catch (err) {
+    console.error("Create shift error:", err);
+    res.status(500).json({ error: "Server error while creating the shift." });
+  }
+});
+
+// is_active alone is the retire/restore path, same convention as beaches -
+// it skips the name/type checks, which would otherwise demand a full body
+// just to hide a row. Retiring never touches Timetable: past and already
+// -assigned weeks read the shift's own row regardless of is_active, only new
+// assignment pickers drop it.
+app.patch("/shifts/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  const { id } = req.params;
+
+  const onlyActiveFlag =
+    Object.keys(req.body || {}).length === 1 && typeof req.body.is_active === "boolean";
+
+  if (onlyActiveFlag) {
+    try {
+      const result = await db.query(
+        `UPDATE shifts SET is_active = $1 WHERE shift_id = $2 RETURNING *;`,
+        [req.body.is_active, id]
+      );
+      if (result.rows.length === 0) return res.status(404).json({ error: "Shift not found." });
+      return res.json({ message: "Shift updated successfully", shift: result.rows[0] });
+    } catch (err) {
+      console.error("Retire shift error:", err);
+      return res.status(500).json({ error: "Server error while updating the shift." });
+    }
+  }
+
+  const parsed = readShiftBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  try {
+    const result = await db.query(
+      `UPDATE shifts SET shift_name = $1, shift_type = $2, start_time = $3, end_time = $4
+       WHERE shift_id = $5
+       RETURNING *;`,
+      [parsed.value.shift_name, parsed.value.shift_type, parsed.value.start_time, parsed.value.end_time, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Shift not found." });
+    res.json({ message: "Shift updated successfully", shift: result.rows[0] });
+  } catch (err) {
+    console.error("Update shift error:", err);
+    res.status(500).json({ error: "Server error while updating the shift." });
+  }
+});
+
 // Timetable table
 //--------------------------------------------------------------
 
