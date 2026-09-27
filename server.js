@@ -1441,22 +1441,15 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       });
     }
 
-    if (
-      !species ||
-      !health_condition ||
-      scl_max == null ||
-      scl_min == null ||
-      scw == null ||
-      ccl_max == null ||
-      ccl_min == null ||
-      ccw == null ||
-      tail_extension == null ||
-      vent_to_tail_tip == null ||
-      total_tail_length == null
-    ) {
+    if (!species || !health_condition) {
       return res.status(400).json({
         error: "Missing required fields."
       });
+    }
+
+    const fieldError = await checkFieldRequirements("turtle", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
     }
 
     const rangeError = outOfRange(req.body, TURTLE_RANGES);
@@ -1531,17 +1524,17 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       rear_right_tag || null,
       rear_right_address || null,
 
-      scl_max,
-      scl_min,
-      scw,
+      scl_max ?? null,
+      scl_min ?? null,
+      scw ?? null,
 
-      ccl_max,
-      ccl_min,
-      ccw,
+      ccl_max ?? null,
+      ccl_min ?? null,
+      ccw ?? null,
 
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length
+      tail_extension ?? null,
+      vent_to_tail_tip ?? null,
+      total_tail_length ?? null
     ]);
 
     const review = await queueReviewSafely("turtle", result.rows[0]?.id, req);
@@ -1903,6 +1896,126 @@ const readAlertsBody = (body) => {
   return { value: { reviewer_pending: { enabled: rp.enabled, after_hours: hours }, submitter_feedback: { enabled: sf.enabled } } };
 };
 
+// Field requirements. Only fields with no downstream logic depending on them
+// are here - nest_code, dates, beach, event_type and the like stay hardcoded,
+// because the app cannot work without them. Each group is a whole-or-nothing
+// unit: GPS means both lat and long, triangulation means every field of both
+// corners. `default` is what the app already did before this setting existed,
+// so an unconfigured project behaves exactly as it always has. `conditional`
+// gates a group on the rest of the body - reburied measurements only matter
+// once eggs were actually reburied, and that rule is not itself configurable.
+const FORM_FIELD_SCHEMA = {
+  nest: {
+    gps: { keys: ["gps_lat", "gps_long"], label: "GPS", default: "required" },
+    distance_to_sea_s: { keys: ["distance_to_sea_s"], label: "Distance to sea", default: "required" },
+    track_sketch: { keys: ["track_sketch"], label: "Track sketch", default: "recommended" },
+    triangulation: {
+      keys: ["tri_tl_desc", "tri_tl_lat", "tri_tl_long", "tri_tl_distance", "tri_tr_desc", "tri_tr_lat", "tri_tr_long", "tri_tr_distance"],
+      label: "Triangulation", default: "recommended",
+    },
+    notes: { keys: ["notes"], label: "Notes", default: "recommended" },
+  },
+  emergence: {
+    // Recommended, not required: the manual-entry screen already insists on
+    // these, but the API itself never has - other callers (an import, an
+    // older client) still create emergences without them, and a default
+    // change here must never start rejecting requests that used to succeed.
+    gps: { keys: ["gps_lat", "gps_long"], label: "GPS", default: "recommended" },
+    distance_to_sea_s: { keys: ["distance_to_sea_s"], label: "Distance to sea", default: "recommended" },
+    track_sketch: { keys: ["track_sketch"], label: "Track sketch", default: "recommended" },
+  },
+  nest_event: {
+    // Recommended by default for the same reason as emergence.gps above: the
+    // inventory screen already requires these once eggs were reburied, but
+    // the API has never checked them, and existing callers depend on that.
+    reburied_measurements: {
+      keys: ["reburied_depth_top_egg_h", "reburied_depth_bottom_chamber_h", "reburied_width_w", "reburied_distance_to_sea_s", "reburied_gps_lat", "reburied_gps_long"],
+      label: "Reburied measurements", default: "recommended",
+      conditional: (body) => Number(body.eggs_reburied) > 0,
+    },
+    observer: { keys: ["observer"], label: "Observer", default: "recommended" },
+    notes: { keys: ["notes"], label: "Notes", default: "recommended" },
+  },
+  turtle: {
+    front_left_tag: { keys: ["front_left_tag", "front_left_address"], label: "Front-left tag", default: "recommended" },
+    front_right_tag: { keys: ["front_right_tag", "front_right_address"], label: "Front-right tag", default: "recommended" },
+    rear_left_tag: { keys: ["rear_left_tag", "rear_left_address"], label: "Rear-left tag", default: "recommended" },
+    rear_right_tag: { keys: ["rear_right_tag", "rear_right_address"], label: "Rear-right tag", default: "recommended" },
+    measurements: {
+      keys: ["scl_max", "scl_min", "scw", "ccl_max", "ccl_min", "ccw", "tail_extension", "vent_to_tail_tip", "total_tail_length"],
+      label: "Measurements", default: "required",
+    },
+  },
+  morning_survey: {
+    // Recommended by default, same reasoning: the survey screen already
+    // requires the corner GPS, the API never has.
+    gps: { keys: ["tl_lat", "tl_long", "tr_lat", "tr_long"], label: "Corner GPS", default: "recommended" },
+    protected_nest_count: { keys: ["protected_nest_count"], label: "Protected nest count", default: "recommended" },
+    notes: { keys: ["notes"], label: "Notes", default: "recommended" },
+  },
+};
+
+const defaultFieldRequirements = () => {
+  const out = {};
+  for (const [form, fields] of Object.entries(FORM_FIELD_SCHEMA)) {
+    out[form] = Object.fromEntries(Object.entries(fields).map(([key, def]) => [key, def.default]));
+  }
+  return out;
+};
+
+const getFieldRequirements = async () => {
+  const levels = defaultFieldRequirements();
+  const stored = await readSetting("field_requirements");
+  if (!stored) return levels;
+  for (const [form, fields] of Object.entries(FORM_FIELD_SCHEMA)) {
+    for (const key of Object.keys(fields)) {
+      const level = stored[form]?.[key];
+      if (level === "required" || level === "recommended") levels[form][key] = level;
+    }
+  }
+  return levels;
+};
+
+const readFieldRequirementsBody = (body) => {
+  const out = {};
+  for (const [form, fields] of Object.entries(FORM_FIELD_SCHEMA)) {
+    const given = body?.[form];
+    if (!given || typeof given !== "object" || Array.isArray(given)) {
+      return { error: `${form} is required.` };
+    }
+    out[form] = {};
+    for (const key of Object.keys(fields)) {
+      const level = given[key];
+      if (level !== "required" && level !== "recommended") {
+        return { error: `${form}.${key} must be "required" or "recommended".` };
+      }
+      out[form][key] = level;
+    }
+    // A field not in the schema (a typo, or one only the schema allows) is
+    // silently dropped rather than accepted - the allowlist is the point.
+  }
+  return { value: out };
+};
+
+const isBlank = (v) => v === null || v === undefined || v === "";
+
+// Checks the configurable fields of one form against the coordinator's
+// requirement levels. Structural fields (ids, dates, the ones the app cannot
+// run without) are validated by the route itself, before this ever runs.
+const checkFieldRequirements = async (formType, body) => {
+  const schema = FORM_FIELD_SCHEMA[formType];
+  if (!schema) return null;
+  const levels = (await getFieldRequirements())[formType] || {};
+  for (const [key, def] of Object.entries(schema)) {
+    if (levels[key] !== "required") continue;
+    if (def.conditional && !def.conditional(body)) continue;
+    if (def.keys.some((k) => isBlank(body[k]))) {
+      return `${def.label} is required.`;
+    }
+  }
+  return null;
+};
+
 app.get("/settings", async (req, res) => {
   try {
     res.json({
@@ -1910,6 +2023,7 @@ app.get("/settings", async (req, res) => {
       review_rules: await getReviewRules(),
       lists: await getLists(),
       alerts: await getAlertSettings(),
+      field_requirements: await getFieldRequirements(),
     });
   } catch (err) {
     console.error("Get settings error:", err);
@@ -1938,6 +2052,7 @@ const saveSetting = (key, read, after) => async (req, res) => {
 app.put("/settings/seasons", requireRole(COORDINATOR), saveSetting("seasons", readSeasonsBody, async () => ({ seasons: await getSeasons() })));
 app.put("/settings/lists", requireRole(COORDINATOR), saveSetting("lists", readListsBody, async () => ({ lists: await getLists() })));
 app.put("/settings/alerts", requireRole(COORDINATOR), saveSetting("alerts", readAlertsBody, async () => ({ alerts: await getAlertSettings() })));
+app.put("/settings/field-requirements", requireRole(COORDINATOR), saveSetting("field_requirements", readFieldRequirementsBody, async () => ({ field_requirements: await getFieldRequirements() })));
 app.put("/settings/review-rules", requireRole(COORDINATOR), saveSetting("review_rules", readReviewRulesBody, async () => ({ review_rules: await getReviewRules() })));
 
 // Whether this person's record of this type is held for a Field Leader. Only
@@ -2155,21 +2270,15 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       sex
     } = req.body;
 
-    if (
-      !health_condition ||
-      scl_max == null ||
-      scl_min == null ||
-      scw == null ||
-      ccl_max == null ||
-      ccl_min == null ||
-      ccw == null ||
-      tail_extension == null ||
-      vent_to_tail_tip == null ||
-      total_tail_length == null
-    ) {
+    if (!health_condition) {
       return res.status(400).json({
-        error: "health_condition and all measurement fields are required."
+        error: "health_condition is required."
       });
+    }
+
+    const fieldError = await checkFieldRequirements("turtle", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
     }
 
     const rangeError = outOfRange(req.body, TURTLE_RANGES);
@@ -2237,17 +2346,17 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       rear_right_tag || null,
       rear_right_address || null,
 
-      scl_max,
-      scl_min,
-      scw,
+      scl_max ?? null,
+      scl_min ?? null,
+      scw ?? null,
 
-      ccl_max,
-      ccl_min,
-      ccw,
+      ccl_max ?? null,
+      ccl_min ?? null,
+      ccw ?? null,
 
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length,
+      tail_extension ?? null,
+      vent_to_tail_tip ?? null,
+      total_tail_length ?? null,
 
       id,
 
@@ -2573,16 +2682,13 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
     } = req.body;
 
     // Required fields validation
-    if (
-      !nest_code ||
-      depth_top_egg_h == null ||
-      distance_to_sea_s == null ||
-      gps_long == null ||
-      gps_lat == null ||
-      !date_found ||
-      !beach
-    ) {
+    if (!nest_code || depth_top_egg_h == null || !date_found || !beach) {
       return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    const fieldError = await checkFieldRequirements("nest", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
     }
 
     const rangeError = invalidNest(req.body);
@@ -2611,7 +2717,7 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
       `INSERT INTO turtle_emergences (gps_lat, gps_long, distance_to_sea_s, beach, event_date, track_sketch)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *;`,
-      [gps_lat, gps_long, distance_to_sea_s, beach, date_found, sketch]
+      [gps_lat || null, gps_long || null, distance_to_sea_s || null, beach, date_found, sketch]
     );
 
     console.log("Emergence result rows:", emergenceResult.rows);
@@ -2647,10 +2753,10 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
         currentEggs || null,
         depth_top_egg_h,
         depth_bottom_chamber_h || null,
-        distance_to_sea_s,
+        distance_to_sea_s || null,
         width_w || null,
-        gps_long,
-        gps_lat,
+        gps_long || null,
+        gps_lat || null,
         tri_tl_desc || null,
         tri_tl_lat || null,
         tri_tl_long || null,
@@ -3040,6 +3146,11 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: "event_type and nest_code are required." });
     }
 
+    const fieldError = await checkFieldRequirements("nest_event", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
+    }
+
     const rangeError = outOfRange(req.body, NEST_EVENT_RANGES);
     if (rangeError) {
       return res.status(400).json({ error: rangeError });
@@ -3349,6 +3460,11 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
 
     if (!event_date) {
       return res.status(400).json({ error: "event_date is required." });
+    }
+
+    const fieldError = await checkFieldRequirements("emergence", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
     }
 
     const rangeError = outOfRange(req.body, EMERGENCE_RANGES);
@@ -3999,6 +4115,11 @@ app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
 
     if (!survey_date || !start_time || !end_time || !beach_id) {
       return res.status(400).json({ error: "Missing required survey metadata." });
+    }
+
+    const fieldError = await checkFieldRequirements("morning_survey", req.body);
+    if (fieldError) {
+      return res.status(400).json({ error: fieldError });
     }
 
     const sql = `
