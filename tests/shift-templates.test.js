@@ -21,7 +21,7 @@ beforeEach(() => {
 });
 afterAll(() => db.end().catch(() => {}));
 
-const valid = { shift_name: 'Night Patrol', shift_type: 'Night', start_time: '21:00', end_time: '01:00' };
+const valid = { shift_name: 'Evening Watch', shift_type: 'Afternoon', start_time: '21:00', end_time: '01:00' };
 
 describe('who may manage shift types', () => {
   it.each(['Field Assistant', 'Field Volunteer'])('refuses %s', async (role) => {
@@ -53,10 +53,10 @@ describe('creating a shift', () => {
     query.mockResolvedValue({ rows: [{ shift_id: 8, ...valid, is_active: true }] });
     const res = await asLeader(request(app).post('/shifts')).send(valid);
     expect(res.status).toBe(201);
-    expect(res.body.shift).toMatchObject({ shift_id: 8, shift_name: 'Night Patrol' });
+    expect(res.body.shift).toMatchObject({ shift_id: 8, shift_name: 'Evening Watch' });
     const call = query.mock.calls[0];
     expect(String(call[0])).toContain('INSERT INTO shifts');
-    expect(call[1]).toEqual(['Night Patrol', 'Night', '21:00', '01:00']);
+    expect(call[1]).toEqual(['Evening Watch', 'Afternoon', '21:00', '01:00']);
   });
 
   it('allows an open-ended shift with no end time, like a morning survey', async () => {
@@ -70,6 +70,7 @@ describe('creating a shift', () => {
     ['no name', { shift_type: 'Morning' }],
     ['a blank name', { shift_name: '  ', shift_type: 'Morning' }],
     ['an unknown type', { shift_name: 'X', shift_type: 'Brunch' }],
+    ['a type the live database does not accept', { shift_name: 'X', shift_type: 'Night' }],
     ['a malformed start time', { shift_name: 'X', shift_type: 'Morning', start_time: '6am' }],
     ['a malformed end time', { shift_name: 'X', shift_type: 'Morning', end_time: '25:99' }],
   ])('rejects %s', async (_label, body) => {

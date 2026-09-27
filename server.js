@@ -3756,7 +3756,12 @@ app.get("/shifts", async (req, res) => {
 // set rather than free text: DEFAULT_SHIFT_TIMES and the volunteer-hours
 // report on the frontend key off it. A shift with no end_time (an open-ended
 // morning survey) is allowed - the frontend already treats that as normal.
-const SHIFT_TYPES = ["Morning", "Afternoon", "Night", "All Day"];
+// "Night" is deliberately absent: the live shifts.shift_type column rejects
+// it (a constraint from before this table was reachable through the API),
+// confirmed against the deployed database - offering a type the database
+// then 500s on would be worse than not offering it. Widening that constraint
+// is a database change outside what this route can safely do blind.
+const SHIFT_TYPES = ["Morning", "Afternoon", "All Day"];
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 
 const readShiftBody = (body) => {
