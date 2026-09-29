@@ -3953,6 +3953,255 @@ app.delete("/timetable/remove", requireRole(COORDINATOR, LEADER), async (req, re
   }
 });
 
+// Roster templates
+//
+// A named, reusable weekly pattern - who covers which shift on which day of
+// the week - so a coordinator builds "the standard week" once instead of
+// re-entering the same names into Timetable every week. Applying a template
+// only ever creates ordinary Timetable rows through the same path a hand-built
+// week would use; nothing downstream needs to know a template was involved.
+// Coordinator only: this reshapes who is expected where, which is a step
+// beyond running the timetable day to day.
+//---------------------------------------------------------------
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS roster_templates (
+          id         SERIAL PRIMARY KEY,
+          name       TEXT        NOT NULL,
+          created_by INTEGER,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS roster_template_rows (
+          id           SERIAL PRIMARY KEY,
+          template_id  INTEGER NOT NULL REFERENCES roster_templates(id) ON DELETE CASCADE,
+          day_of_week  INTEGER NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+          shift_id     INTEGER NOT NULL,
+          user_id      INTEGER NOT NULL
+        );
+      `);
+      await db.query(
+        "CREATE INDEX IF NOT EXISTS roster_template_rows_template_idx ON roster_template_rows (template_id);"
+      );
+      console.log("roster_templates is present.");
+    } catch (err) {
+      console.error("Could not ensure roster_templates:", err.message);
+    }
+  })();
+}
+
+const readRosterTemplateBody = (body) => {
+  const name = String(body?.name ?? "").trim();
+  if (!name) return { error: "A template needs a name." };
+  if (name.length > 60) return { error: "The template name is too long." };
+
+  if (!Array.isArray(body?.rows) || body.rows.length === 0) {
+    return { error: "A template needs at least one row." };
+  }
+  if (body.rows.length > 200) return { error: "That is too many rows for one template." };
+
+  const rows = [];
+  for (const r of body.rows) {
+    const day_of_week = Number(r?.day_of_week);
+    const shift_id = Number(r?.shift_id);
+    const user_id = Number(r?.user_id);
+    if (!Number.isInteger(day_of_week) || day_of_week < 0 || day_of_week > 6) {
+      return { error: `Each row needs a day of week from 0 (Sunday) to 6 (Saturday).` };
+    }
+    if (!Number.isInteger(shift_id) || !Number.isInteger(user_id)) {
+      return { error: "Each row needs a shift and a volunteer." };
+    }
+    rows.push({ day_of_week, shift_id, user_id });
+  }
+  return { value: { name, rows } };
+};
+
+// A template's rows, attached under each template - one query for the list
+// rather than N+1, and the shape the frontend's editor already wants.
+const attachRosterTemplateRows = async (templates) => {
+  if (templates.length === 0) return [];
+  const ids = templates.map((t) => t.id);
+  const rows = await db.query(
+    `SELECT r.id, r.template_id, r.day_of_week, r.shift_id, r.user_id,
+            s.shift_name, s.shift_type, u.first_name, u.last_name
+     FROM roster_template_rows r
+     LEFT JOIN shifts s ON s.shift_id = r.shift_id
+     LEFT JOIN users u ON u.id = r.user_id
+     WHERE r.template_id = ANY($1::int[])
+     ORDER BY r.day_of_week ASC, s.start_time ASC NULLS LAST;`,
+    [ids]
+  );
+  const byTemplate = new Map();
+  for (const row of rows.rows) {
+    if (!byTemplate.has(row.template_id)) byTemplate.set(row.template_id, []);
+    byTemplate.get(row.template_id).push(row);
+  }
+  return templates.map((t) => ({ ...t, rows: byTemplate.get(t.id) || [] }));
+};
+
+app.get("/roster-templates", requireRole(COORDINATOR), async (req, res) => {
+  try {
+    const result = await db.query("SELECT * FROM roster_templates ORDER BY name ASC;");
+    res.json({ templates: await attachRosterTemplateRows(result.rows) });
+  } catch (err) {
+    console.error("List roster templates error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+app.post("/roster-templates", requireRole(COORDINATOR), async (req, res) => {
+  const parsed = readRosterTemplateBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const template = await client.query(
+      "INSERT INTO roster_templates (name, created_by) VALUES ($1, $2) RETURNING *;",
+      [parsed.value.name, req.user?.id ?? null]
+    );
+    for (const r of parsed.value.rows) {
+      await client.query(
+        "INSERT INTO roster_template_rows (template_id, day_of_week, shift_id, user_id) VALUES ($1, $2, $3, $4);",
+        [template.rows[0].id, r.day_of_week, r.shift_id, r.user_id]
+      );
+    }
+    await client.query("COMMIT");
+    const [withRows] = await attachRosterTemplateRows(template.rows);
+    res.status(201).json({ message: "Template created successfully", template: withRows });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Create roster template error:", err);
+    res.status(500).json({ error: "Server error while creating the template." });
+  } finally {
+    client.release();
+  }
+});
+
+// Replaces a template's name and rows wholesale - a coordinator edits it as
+// one form, not row by row, so this is simpler and cannot leave a stray row
+// behind from a deleted one.
+app.put("/roster-templates/:id", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  const parsed = readRosterTemplateBody(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const template = await client.query(
+      "UPDATE roster_templates SET name = $1 WHERE id = $2 RETURNING *;",
+      [parsed.value.name, id]
+    );
+    if (template.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Template not found." });
+    }
+    await client.query("DELETE FROM roster_template_rows WHERE template_id = $1;", [id]);
+    for (const r of parsed.value.rows) {
+      await client.query(
+        "INSERT INTO roster_template_rows (template_id, day_of_week, shift_id, user_id) VALUES ($1, $2, $3, $4);",
+        [id, r.day_of_week, r.shift_id, r.user_id]
+      );
+    }
+    await client.query("COMMIT");
+    const [withRows] = await attachRosterTemplateRows(template.rows);
+    res.json({ message: "Template updated successfully", template: withRows });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Update roster template error:", err);
+    res.status(500).json({ error: "Server error while updating the template." });
+  } finally {
+    client.release();
+  }
+});
+
+// A template is pure convenience config: nothing else references it, so
+// unlike a beach or a shift type it can simply be deleted. The rows an
+// earlier "apply" created are ordinary Timetable entries by that point and
+// are untouched.
+app.delete("/roster-templates/:id", requireRole(COORDINATOR), async (req, res) => {
+  try {
+    const result = await db.query("DELETE FROM roster_templates WHERE id = $1 RETURNING id;", [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: "Template not found." });
+    res.json({ message: "Template deleted successfully." });
+  } catch (err) {
+    console.error("Delete roster template error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Creates the Timetable rows for one week from a template. A person who
+// already has anything on that date - including a Day Off, which is an
+// ordinary shift row like any other - is skipped rather than double-booked,
+// and so is a row that would exactly repeat one this template already
+// created, which is what makes applying the same template twice safe.
+app.post("/roster-templates/:id/apply", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  const { monday_date } = req.body;
+  if (!monday_date || !/^\d{4}-\d{2}-\d{2}$/.test(monday_date)) {
+    return res.status(400).json({ error: "monday_date (YYYY-MM-DD, a Monday) is required." });
+  }
+
+  try {
+    const template = await db.query("SELECT id, name FROM roster_templates WHERE id = $1;", [id]);
+    if (template.rows.length === 0) return res.status(404).json({ error: "Template not found." });
+
+    const rows = await db.query(
+      `SELECT r.day_of_week, r.shift_id, r.user_id, s.shift_name, u.first_name, u.last_name
+       FROM roster_template_rows r
+       LEFT JOIN shifts s ON s.shift_id = r.shift_id
+       LEFT JOIN users u ON u.id = r.user_id
+       WHERE r.template_id = $1;`,
+      [id]
+    );
+
+    const monday = new Date(`${monday_date}T00:00:00Z`);
+    // day_of_week is 0 (Sunday) - 6 (Saturday); Monday is offset 0 in the week
+    // the calling screen already works in, so the map runs Sun..Sat -> -1..5.
+    const dateFor = (dow) => {
+      const offset = dow === 0 ? 6 : dow - 1;
+      const d = new Date(monday);
+      d.setUTCDate(d.getUTCDate() + offset);
+      return d.toISOString().slice(0, 10);
+    };
+
+    const created = [];
+    const skipped = [];
+    for (const r of rows.rows) {
+      const work_date = dateFor(r.day_of_week);
+      const who = [r.first_name, r.last_name].filter(Boolean).join(" ") || `user ${r.user_id}`;
+
+      const existing = await db.query(
+        "SELECT shift_id FROM Timetable WHERE user_id = $1 AND work_date = $2;",
+        [r.user_id, work_date]
+      );
+      if (existing.rows.some((e) => e.shift_id === r.shift_id)) {
+        skipped.push({ user: who, date: work_date, shift: r.shift_name, reason: "already assigned" });
+        continue;
+      }
+      if (existing.rows.length > 0) {
+        skipped.push({ user: who, date: work_date, shift: r.shift_name, reason: "already has something that day" });
+        continue;
+      }
+
+      const inserted = await db.query(
+        "INSERT INTO Timetable (user_id, shift_id, work_date) VALUES ($1, $2, $3) RETURNING assignment_id;",
+        [r.user_id, r.shift_id, work_date]
+      );
+      created.push({ user: who, date: work_date, shift: r.shift_name, assignment_id: inserted.rows[0].assignment_id });
+    }
+
+    res.json({ message: `Applied "${template.rows[0].name}" to the week of ${monday_date}.`, created, skipped });
+  } catch (err) {
+    console.error("Apply roster template error:", err);
+    res.status(500).json({ error: "Server error while applying the template." });
+  }
+});
+
 // Beaches table
 //---------------------------------------------------------------
 
