@@ -51,6 +51,8 @@ beforeEach(() => {
     if (text.includes('SELECT id, nest_code AS label') ) return { rows: [{ id: 9, label: 'LG2-9' }] };
     if (text.includes('AS label FROM')) return { rows: [{ id: 9, label: 'LG2-9' }] };
     if (text.includes('SELECT species, health_condition FROM turtles')) return { rows: [existingTurtle] };
+    // Not under test here - no nest is overdue in these fixtures.
+    if (text.includes('FROM turtle_nests') && text.includes('date_found <=')) return { rows: [] };
     return { rows: [{ id: 42 }] };
   });
 });

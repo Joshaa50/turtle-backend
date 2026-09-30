@@ -5185,6 +5185,30 @@ app.get("/alerts", async (req, res) => {
       }
     }
 
+    // A nest well past a normal incubation needs a reviewer to send someone to
+    // excavate it - today that only showed up as a badge on the nest itself,
+    // so a leader who wasn't already looking at that nest had no way to know.
+    // Mirrors OVERDUE_DAYS in the frontend's lib/nestLifecycle.ts.
+    if (isReviewer) {
+      const overdue = await db.query(
+        `SELECT nest_code, beach, date_found
+         FROM turtle_nests
+         WHERE COALESCE(is_archived, false) = false
+           AND LOWER(COALESCE(status, '')) <> 'hatched'
+           AND date_found <= NOW() - (70 * INTERVAL '1 day')
+         ORDER BY date_found ASC LIMIT 50;`
+      );
+      for (const n of overdue.rows) {
+        const days = Math.floor((Date.now() - new Date(n.date_found).getTime()) / 86400000);
+        alerts.push({
+          id: `nest-overdue-${n.nest_code}`, kind: "nest_overdue",
+          title: "Nest overdue for excavation",
+          message: `${n.nest_code} on ${n.beach || "an unrecorded beach"} was found ${days} days ago and still has no inventory recorded.`,
+          at: n.date_found, can_acknowledge: false,
+        });
+      }
+    }
+
     alerts.sort((a, b) => new Date(b.at) - new Date(a.at));
     res.json({ alerts });
   } catch (err) {
