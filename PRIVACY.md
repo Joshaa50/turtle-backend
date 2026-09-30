@@ -78,20 +78,20 @@ treat that gap as a real one to resolve before piloting.
 
 ## Retention and deletion
 
-There is still no automatic retention limit — records are kept until somebody
-removes them. Two things a person can ask for are now built, and a Project
-Coordinator performs both:
+Three things a person can ask for — or a Project Coordinator can set up to
+happen automatically for the first — are built:
 
 **A copy of what is held about them.** Everything the app stores that names
 them: their account, their shift assignments, the records they submitted for
 review, reviews they decided, their entries in the audit trail, and the field
 records that carry their name as observer. It never includes a password.
 
-**Erasure.** This removes the identifying details and keeps the observations.
-Their name, email, profile picture and station are replaced, the account is
-deactivated and its password made unusable, their future shifts are deleted,
-their email is stripped from the audit trail, and their name is replaced
-wherever it appears as an observer on a record.
+**Erasure**, performed by a Project Coordinator. This removes the identifying
+details and keeps the observations. Their name, email, profile picture and
+station are replaced, the account is deactivated and its password made
+unusable, their future shifts are deleted, their email is stripped from the
+audit trail, and their name is replaced wherever it appears as an observer on
+a record.
 
 The nests, surveys and turtle encounters themselves are **kept**. A nest
 record describes an animal and a beach, not the person who wrote it down, and
@@ -102,11 +102,22 @@ fits your own obligations. What is removed is removed completely; what is kept
 is labelled honestly as having had its observer removed, rather than left
 looking as though nobody recorded it.
 
-Erasure cannot be undone, so it asks the coordinator to type the account's
-email address to confirm, and it refuses to erase the last active coordinator.
+A coordinator-performed erasure cannot be undone, so it asks the coordinator
+to type the account's email address to confirm, and it refuses to erase the
+last active coordinator.
 
-If your organization needs a retention limit, or self-service rather than
-coordinator-performed requests, raise it before piloting.
+**Automatic erasure for a dormant account**, configured in Project Settings
+(Project Coordinator only, off by default). When turned on with a number of
+days, an account nobody has signed into for that long is erased the same way
+as above, the next time a coordinator opens the team list. A coordinator is
+warned - which accounts, and when - 14 days before it happens, so there is a
+chance to notice "on a long break" before it becomes "gone." The demo
+accounts used to show the app are never swept, and the last active
+coordinator is never auto-erased regardless of how long they have been away.
+
+If your organization needs self-service erasure (a person requesting their
+own removal, rather than a coordinator acting on their behalf), raise it
+before piloting - that is still not built.
 
 ## Questions
 

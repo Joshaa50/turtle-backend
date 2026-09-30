@@ -435,6 +435,21 @@ if (require.main === module) {
   })();
 }
 
+// "Inactive" cannot be measured without a record of when someone last
+// actually used the app. Set on every real login (never on a demo one - see
+// the retention sweep below); a person who was invited and never signed in
+// has none, and retention falls back to when the account was created.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;");
+      console.log("users.last_login_at is present.");
+    } catch (err) {
+      console.error("Could not ensure users.last_login_at:", err.message);
+    }
+  })();
+}
+
 // Same idempotent boot-migration pattern as record_reviews: safe on every
 // boot, skipped when the module is only imported for tests.
 if (require.main === module) {
@@ -551,6 +566,12 @@ app.post("/users/register", async (req, res) => {
 // still read their own record through GET /users/:id.
 app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
   try {
+    // Coordinator-scoped, not Field Leader: erasure is irreversible, so it
+    // only runs from a context the coordinator themself reached, the same
+    // way the manual route is coordinator-only. A Field Leader browsing the
+    // team list must never trigger it as a side effect of just looking.
+    if (req.user?.role === COORDINATOR) await applyRetentionSweep(req);
+
     // Never `SELECT *` here: the row carries password_hash, and this response
     // is serialised straight to the client.
     const sql = `
@@ -643,6 +664,11 @@ app.post("/users/login", async (req, res) => {
         reason: "UNVERIFIED",
       });
     }
+
+    // Best-effort: a failure here must never turn a correct password into a
+    // failed login.
+    db.query("UPDATE users SET last_login_at = NOW() WHERE id = $1;", [user.id])
+      .catch((err) => console.error("Could not record last_login_at:", err.message));
 
     res.json({
       message: "Login successful",
@@ -1220,6 +1246,73 @@ app.delete("/nest-photos/:photoId", requireRole(...REVIEWERS), async (req, res) 
 const erasedEmailFor = (id) => `erased-${id}@removed.invalid`;
 const ERASED_NAME = "Removed";
 
+// The GDPR erasure itself, shared by the coordinator-initiated route and the
+// automatic retention sweep below - one implementation, so a change to what
+// gets erased can never drift between the two paths.
+//
+// `client` is an open transaction already past BEGIN; the caller commits or
+// rolls back. `person` is the already-locked row ({id, first_name,
+// last_name, email, role}) - fetched `FOR UPDATE` by the caller, so this
+// never races a second erasure of the same account. Guards against erasing
+// the last active coordinator regardless of who or what triggered it.
+const eraseUserRow = async (client, person, { req, summary }) => {
+  if (person.role === COORDINATOR) {
+    const others = await client.query(
+      `SELECT COUNT(*)::int AS n FROM users WHERE role = $1 AND is_active = true AND id <> $2;`,
+      [COORDINATOR, person.id]
+    );
+    if (others.rows[0].n === 0) {
+      return { error: "last_coordinator" };
+    }
+  }
+
+  const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
+  const unusable = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
+
+  await client.query(
+    `UPDATE users
+     SET first_name = $1, last_name = '', email = $2, profile_picture = NULL,
+         station = '', password_hash = $3, is_active = false, is_email_verified = false
+     WHERE id = $4;`,
+    [ERASED_NAME, erasedEmailFor(person.id), unusable, person.id]
+  );
+
+  const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1;`, [person.id]);
+
+  const audit = await client.query(
+    `UPDATE record_audit SET actor_email = NULL WHERE actor_id = $1 RETURNING id;`,
+    [person.id]
+  );
+
+  let observerRows = 0;
+  if (fullName) {
+    for (const table of ["turtle_survey_events", "turtle_nest_events"]) {
+      const r = await client.query(
+        `UPDATE ${table} SET observer = $1 WHERE observer = $2 RETURNING id;`,
+        [ERASED_NAME, fullName]
+      );
+      observerRows += r.rowCount;
+    }
+  }
+
+  await recordAudit(client, {
+    recordType: "user",
+    recordId: Number(person.id),
+    action: "deleted",
+    req,
+    summary,
+  });
+
+  return {
+    erased: {
+      account: Number(person.id),
+      shift_assignments_deleted: shifts.rowCount,
+      audit_entries_de_identified: audit.rowCount,
+      field_records_observer_replaced: observerRows,
+    },
+  };
+};
+
 app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
@@ -1306,87 +1399,22 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
       return res.status(400).json({ error: "That email does not match the account you are erasing." });
     }
 
-    // Losing the last coordinator would leave nobody able to approve accounts
-    // or run an erasure again - the same reasoning that guards self-deletion.
-    if (person.role === COORDINATOR) {
-      const others = await client.query(
-        `SELECT COUNT(*)::int AS n FROM users WHERE role = $1 AND is_active = true AND id <> $2;`,
-        [COORDINATOR, id]
-      );
-      if (others.rows[0].n === 0) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({
-          error: "This is the last active coordinator. Give somebody else that role first.",
-        });
-      }
-    }
-
-    const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
-
-    // A password nobody holds: the row has to stay for the records that
-    // reference it, but it must stop being an account anyone can sign into.
-    const unusable = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
-
-    await client.query(
-      // station is blanked rather than set to NULL: the column is NOT NULL, so
-      // nulling it fails the whole transaction. Empty is equivalent here -
-      // /public/stations already filters station <> '' - so this removes it
-      // from the account without leaving it in any list.
-      `UPDATE users
-       SET first_name = $1, last_name = '', email = $2, profile_picture = NULL,
-           station = '', password_hash = $3, is_active = false, is_email_verified = false
-       WHERE id = $4;`,
-      [ERASED_NAME, erasedEmailFor(id), unusable, id]
-    );
-
-    // A rota is about who is working, so an erased person's shifts have no
-    // reason to persist. Field records do, which is why only this one is a
-    // delete.
-    // No RETURNING: this table's key is assignment_id, and asking for a
-    // column that does not exist aborted the transaction - so the erasure
-    // rolled back every time while reporting a server error. rowCount is what
-    // the response actually reports anyway.
-    const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1;`, [id]);
-
-    // The trail keeps its shape - something was created, by a coordinator, on
-    // a date - without keeping the address that identifies who.
-    const audit = await client.query(
-      `UPDATE record_audit SET actor_email = NULL WHERE actor_id = $1 RETURNING id;`,
-      [id]
-    );
-
-    // The typed observer name is the person's name sitting in a field record.
-    // Replaced rather than blanked, so the record still says somebody observed
-    // it and does not read as though the observer was never recorded.
-    let observerRows = 0;
-    if (fullName) {
-      for (const table of ["turtle_survey_events", "turtle_nest_events"]) {
-        const r = await client.query(
-          `UPDATE ${table} SET observer = $1 WHERE observer = $2 RETURNING id;`,
-          [ERASED_NAME, fullName]
-        );
-        observerRows += r.rowCount;
-      }
-    }
-
-    await recordAudit(client, {
-      recordType: "user",
-      recordId: Number(id),
-      action: "deleted",
+    const result = await eraseUserRow(client, person, {
       req,
       summary: "Personal data erased at request; field records retained",
     });
+    if (result.error === "last_coordinator") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "This is the last active coordinator. Give somebody else that role first.",
+      });
+    }
 
     await client.query("COMMIT");
 
     res.json({
       message: "Personal data erased. Field records were retained.",
-      erased: {
-        account: Number(id),
-        shift_assignments_deleted: shifts.rowCount,
-        audit_entries_de_identified: audit.rowCount,
-        field_records_observer_replaced: observerRows,
-      },
+      erased: result.erased,
     });
   } catch (err) {
     if (client) await client.query("ROLLBACK").catch(() => {});
@@ -1896,6 +1924,97 @@ const readAlertsBody = (body) => {
   return { value: { reviewer_pending: { enabled: rp.enabled, after_hours: hours }, submitter_feedback: { enabled: sf.enabled } } };
 };
 
+// Data retention.
+//
+// PRIVACY.md is explicit that this is the one real gap: field records
+// (nests, emergences, turtles, surveys) are kept forever by design - a
+// season's fieldwork outliving the volunteer who logged it is the point, not
+// a bug - but nothing previously aged out a dormant *account*. This reuses
+// the exact erasure eraseUserRow already performs for a coordinator's manual
+// request; only when someone has been inactive past the configured number of
+// days does it get applied automatically, and the last active coordinator is
+// never touched regardless of the setting.
+const DEFAULT_RETENTION = { auto_erase_enabled: false, inactive_days: 365 };
+
+const getRetentionSettings = async () => {
+  const stored = await readSetting("retention");
+  const days = stored?.inactive_days;
+  return {
+    auto_erase_enabled: stored?.auto_erase_enabled === true,
+    inactive_days: Number.isInteger(days) && days >= 30 && days <= 3650 ? days : DEFAULT_RETENTION.inactive_days,
+  };
+};
+
+const readRetentionBody = (body) => {
+  if (typeof body?.auto_erase_enabled !== "boolean") {
+    return { error: "auto_erase_enabled must be true or false." };
+  }
+  const days = Number(body.inactive_days);
+  if (!Number.isInteger(days) || days < 30 || days > 3650) {
+    return { error: "inactive_days must be a whole number from 30 to 3650 (about ten years)." };
+  }
+  return { value: { auto_erase_enabled: body.auto_erase_enabled, inactive_days: days } };
+};
+
+// Demo accounts (see DEMO_ACCOUNTS) never accrue a real last_login_at - only
+// /users/login sets it, never /demo/login - so without this exclusion they
+// would eventually look indistinguishable from a genuinely dormant account
+// and retention would erase the seed data every project is shown with.
+const isDemoAccountEmail = (email) => String(email || "").toLowerCase().endsWith("@turtleguard.demo");
+
+// One query for "who is due", shared by the sweep that actually erases and
+// the alert that warns about it first - so the two can never disagree about
+// who is on the list.
+const dueForRetention = async (cutoffDays) => {
+  const result = await db.query(
+    `SELECT id, first_name, last_name, email, role,
+            COALESCE(last_login_at, created_at) AS last_activity
+     FROM users
+     WHERE is_active = true
+       AND email NOT LIKE '%@turtleguard.demo'
+       AND COALESCE(last_login_at, created_at) < NOW() - ($1::int * INTERVAL '1 day');`,
+    [cutoffDays]
+  );
+  return result.rows;
+};
+
+// Applied lazily when a coordinator's own request touches it (User
+// Management, the alerts bell) - the same no-scheduler-to-fail pattern as
+// auto-approve. Each account is erased in its own transaction, so one
+// failure - or the last-coordinator guard - never blocks the rest.
+const applyRetentionSweep = async (req) => {
+  try {
+    const settings = await getRetentionSettings();
+    if (!settings.auto_erase_enabled) return;
+    const due = await dueForRetention(settings.inactive_days);
+
+    for (const person of due) {
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        const locked = await client.query(
+          `SELECT id, first_name, last_name, email, role FROM users WHERE id = $1 AND is_active = true LIMIT 1 FOR UPDATE;`,
+          [person.id]
+        );
+        if (locked.rows.length === 0) { await client.query("ROLLBACK"); continue; }
+        const result = await eraseUserRow(client, locked.rows[0], {
+          req,
+          summary: `Personal data erased automatically after ${settings.inactive_days} days of inactivity; field records retained`,
+        });
+        if (result.error) { await client.query("ROLLBACK"); continue; }
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.error(`Retention sweep could not erase user ${person.id}:`, err.message);
+      } finally {
+        client.release();
+      }
+    }
+  } catch (err) {
+    console.error("Retention sweep failed:", err.message);
+  }
+};
+
 // Field requirements. Only fields with no downstream logic depending on them
 // are here - nest_code, dates, beach, event_type and the like stay hardcoded,
 // because the app cannot work without them. Each group is a whole-or-nothing
@@ -2024,6 +2143,7 @@ app.get("/settings", async (req, res) => {
       lists: await getLists(),
       alerts: await getAlertSettings(),
       field_requirements: await getFieldRequirements(),
+      retention: await getRetentionSettings(),
     });
   } catch (err) {
     console.error("Get settings error:", err);
@@ -2052,6 +2172,7 @@ const saveSetting = (key, read, after) => async (req, res) => {
 app.put("/settings/seasons", requireRole(COORDINATOR), saveSetting("seasons", readSeasonsBody, async () => ({ seasons: await getSeasons() })));
 app.put("/settings/lists", requireRole(COORDINATOR), saveSetting("lists", readListsBody, async () => ({ lists: await getLists() })));
 app.put("/settings/alerts", requireRole(COORDINATOR), saveSetting("alerts", readAlertsBody, async () => ({ alerts: await getAlertSettings() })));
+app.put("/settings/retention", requireRole(COORDINATOR), saveSetting("retention", readRetentionBody, async () => ({ retention: await getRetentionSettings() })));
 app.put("/settings/field-requirements", requireRole(COORDINATOR), saveSetting("field_requirements", readFieldRequirementsBody, async () => ({ field_requirements: await getFieldRequirements() })));
 app.put("/settings/review-rules", requireRole(COORDINATOR), saveSetting("review_rules", readReviewRulesBody, async () => ({ review_rules: await getReviewRules() })));
 
@@ -5028,6 +5149,27 @@ app.get("/alerts", async (req, res) => {
             : `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
           at: r.reviewed_at, can_acknowledge: true,
         });
+      }
+    }
+
+    // A coordinator gets a heads-up before an account is auto-erased, not
+    // just the fact of it afterward - erasure is irreversible, and 14 days is
+    // enough notice to tell "on a long break" from "genuinely gone".
+    if (req.user?.role === COORDINATOR) {
+      const retention = await getRetentionSettings();
+      if (retention.auto_erase_enabled) {
+        const soon = await dueForRetention(Math.max(retention.inactive_days - 14, 0));
+        for (const person of soon) {
+          const who = [person.first_name, person.last_name].filter(Boolean).join(" ") || person.email;
+          const erasesAt = new Date(person.last_activity);
+          erasesAt.setUTCDate(erasesAt.getUTCDate() + retention.inactive_days);
+          alerts.push({
+            id: `retention-${person.id}`, kind: "retention_warning",
+            title: "Account due for automatic erasure",
+            message: `${who} (${person.role}) has been inactive since ${new Date(person.last_activity).toISOString().slice(0, 10)} and will be erased on ${erasesAt.toISOString().slice(0, 10)} unless they sign in.`,
+            at: person.last_activity, can_acknowledge: false,
+          });
+        }
       }
     }
 
