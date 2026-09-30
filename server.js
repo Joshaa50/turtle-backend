@@ -3986,18 +3986,18 @@ if (require.main === module) {
       await db.query(`
         DO $$
         DECLARE
-          con RECORD;
+          found_con RECORD;
         BEGIN
           SELECT con.conname AS name, pg_get_constraintdef(con.oid) AS def
-            INTO con
+            INTO found_con
             FROM pg_constraint con
             JOIN pg_class rel ON rel.oid = con.conrelid
            WHERE rel.relname = 'shifts'
              AND con.contype = 'c'
              AND pg_get_constraintdef(con.oid) ILIKE '%shift_type%'
            LIMIT 1;
-          IF con.name IS NOT NULL AND con.def NOT ILIKE '%Night%' THEN
-            EXECUTE format('ALTER TABLE shifts DROP CONSTRAINT %I', con.name);
+          IF found_con.name IS NOT NULL AND found_con.def NOT ILIKE '%Night%' THEN
+            EXECUTE format('ALTER TABLE shifts DROP CONSTRAINT %I', found_con.name);
             ALTER TABLE shifts ADD CONSTRAINT shifts_shift_type_check
               CHECK (shift_type IN ('Morning', 'Afternoon', 'Night', 'All Day'));
           END IF;
