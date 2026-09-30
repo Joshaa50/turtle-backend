@@ -4032,22 +4032,6 @@ const readShiftBody = (body) => {
   return { value: { shift_name, shift_type, start_time, end_time } };
 };
 
-// TEMPORARY diagnostic - remove once the Night-widening migration is
-// confirmed to have taken effect. Read-only, coordinator-gated.
-app.get("/_diag/shift-type", requireRole(COORDINATOR), async (req, res) => {
-  try {
-    const col = await db.query(
-      "SELECT column_name, data_type, udt_name FROM information_schema.columns WHERE table_name = 'shifts' AND column_name = 'shift_type';"
-    );
-    const cons = await db.query(
-      "SELECT con.conname, con.contype, pg_get_constraintdef(con.oid) AS def FROM pg_constraint con JOIN pg_class rel ON rel.oid = con.conrelid WHERE rel.relname = 'shifts';"
-    );
-    res.json({ column: col.rows, constraints: cons.rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.post("/shifts", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const parsed = readShiftBody(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
