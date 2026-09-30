@@ -3969,13 +3969,46 @@ app.get("/shifts", async (req, res) => {
 // set rather than free text: DEFAULT_SHIFT_TIMES and the volunteer-hours
 // report on the frontend key off it. A shift with no end_time (an open-ended
 // morning survey) is allowed - the frontend already treats that as normal.
-// "Night" is deliberately absent: the live shifts.shift_type column rejects
-// it (a constraint from before this table was reachable through the API),
-// confirmed against the deployed database - offering a type the database
-// then 500s on would be worse than not offering it. Widening that constraint
-// is a database change outside what this route can safely do blind.
-const SHIFT_TYPES = ["Morning", "Afternoon", "All Day"];
+// "Night" used to be rejected by a CHECK constraint from before this table
+// was reachable through the API - the boot migration below widens it, so
+// this list and the database agree.
+const SHIFT_TYPES = ["Morning", "Afternoon", "Night", "All Day"];
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+
+// Widens the shifts.shift_type CHECK constraint to match SHIFT_TYPES above.
+// Looks the constraint up by what it's actually checking rather than by a
+// guessed name (it predates this table being reachable through the API, so
+// nothing here created it) and leaves it alone once "Night" is already
+// allowed - safe to run on every boot.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        DO $$
+        DECLARE
+          con RECORD;
+        BEGIN
+          SELECT con.conname AS name, pg_get_constraintdef(con.oid) AS def
+            INTO con
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+           WHERE rel.relname = 'shifts'
+             AND con.contype = 'c'
+             AND pg_get_constraintdef(con.oid) ILIKE '%shift_type%'
+           LIMIT 1;
+          IF con.name IS NOT NULL AND con.def NOT ILIKE '%Night%' THEN
+            EXECUTE format('ALTER TABLE shifts DROP CONSTRAINT %I', con.name);
+            ALTER TABLE shifts ADD CONSTRAINT shifts_shift_type_check
+              CHECK (shift_type IN ('Morning', 'Afternoon', 'Night', 'All Day'));
+          END IF;
+        END $$;
+      `);
+      console.log("shifts.shift_type allows Night.");
+    } catch (err) {
+      console.error("Could not widen shifts.shift_type constraint:", err.message);
+    }
+  })();
+}
 
 const readShiftBody = (body) => {
   const shift_name = String(body?.shift_name ?? "").trim();

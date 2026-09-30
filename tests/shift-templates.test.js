@@ -66,11 +66,19 @@ describe('creating a shift', () => {
     expect(query.mock.calls[0][1]).toEqual(['Loggos Survey', 'Morning', '06:00', null]);
   });
 
+  // The database's shift_type CHECK constraint used to reject "Night" - a
+  // boot migration widens it, so this now succeeds instead of 400ing.
+  it('allows a Night shift now that the database accepts it', async () => {
+    query.mockResolvedValue({ rows: [{ shift_id: 10, shift_name: 'Night Patrol', shift_type: 'Night', start_time: '21:00', end_time: '23:00', is_active: true }] });
+    const res = await asLeader(request(app).post('/shifts')).send({ shift_name: 'Night Patrol', shift_type: 'Night', start_time: '21:00', end_time: '23:00' });
+    expect(res.status).toBe(201);
+    expect(query.mock.calls[0][1]).toEqual(['Night Patrol', 'Night', '21:00', '23:00']);
+  });
+
   it.each([
     ['no name', { shift_type: 'Morning' }],
     ['a blank name', { shift_name: '  ', shift_type: 'Morning' }],
     ['an unknown type', { shift_name: 'X', shift_type: 'Brunch' }],
-    ['a type the live database does not accept', { shift_name: 'X', shift_type: 'Night' }],
     ['a malformed start time', { shift_name: 'X', shift_type: 'Morning', start_time: '6am' }],
     ['a malformed end time', { shift_name: 'X', shift_type: 'Morning', end_time: '25:99' }],
   ])('rejects %s', async (_label, body) => {
