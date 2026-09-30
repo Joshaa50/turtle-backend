@@ -3114,17 +3114,29 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
 // Images excluded for performance â€” fetched individually via the single nest endpoint
 app.get("/nests", async (req, res) => {
   try {
+    // A hatched nest's incubation length is laid-to-excavated, not
+    // laid-to-today - the latter keeps climbing forever once the nest is
+    // done. This mirrors the excavation CTE in /public/stats: the most recent
+    // INVENTORY event per nest is the authoritative "done" date.
     const sql = `
+      WITH excavation AS (
+        SELECT DISTINCT ON (nest_code)
+               nest_code, created_at AS hatched_at
+        FROM turtle_nest_events
+        WHERE event_type LIKE '%INVENTORY%'
+        ORDER BY nest_code, created_at DESC, id DESC
+      )
       SELECT
-        id, nest_code, total_num_eggs, current_num_eggs,
-        depth_top_egg_h, depth_bottom_chamber_h, distance_to_sea_s, width_w,
-        gps_long, gps_lat,
-        tri_tl_desc, tri_tl_lat, tri_tl_long, tri_tl_distance,
-        tri_tr_desc, tri_tr_lat, tri_tr_long, tri_tr_distance,
-        status, relocated, is_archived, date_found, beach, notes,
-        created_at, updated_at
-      FROM turtle_nests
-      ORDER BY date_found DESC, id DESC;
+        n.id, n.nest_code, n.total_num_eggs, n.current_num_eggs,
+        n.depth_top_egg_h, n.depth_bottom_chamber_h, n.distance_to_sea_s, n.width_w,
+        n.gps_long, n.gps_lat,
+        n.tri_tl_desc, n.tri_tl_lat, n.tri_tl_long, n.tri_tl_distance,
+        n.tri_tr_desc, n.tri_tr_lat, n.tri_tr_long, n.tri_tr_distance,
+        n.status, n.relocated, n.is_archived, n.date_found, n.beach, n.notes,
+        n.created_at, n.updated_at, x.hatched_at
+      FROM turtle_nests n
+      LEFT JOIN excavation x ON x.nest_code = n.nest_code
+      ORDER BY n.date_found DESC, n.id DESC;
     `;
 
     const result = await db.query(sql);
