@@ -3110,6 +3110,86 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
   }
 });
 
+// A nest is created with its own emergence record (see POST /nests/create,
+// step 1) - the two are meant to be 1:1. There is otherwise no way to give a
+// nest a different emergence_id after creation: this exists to correct a nest
+// that was, by mistake, ever pointed at another nest's emergence (several
+// nests sharing one emergence, which the season report and beach filters both
+// assume can't happen). Coordinator-only: this rewrites how a record links
+// to its own history, not a day-to-day fieldwork action.
+app.patch("/nests/:id/emergence", requireRole(COORDINATOR), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const nest = await db.query(
+      "SELECT id, nest_code, emergence_id, beach FROM turtle_nests WHERE id = $1 LIMIT 1;",
+      [id]
+    );
+    if (nest.rows.length === 0) return res.status(404).json({ error: "Nest not found." });
+    const current = nest.rows[0];
+    if (!current.emergence_id) {
+      return res.status(400).json({ error: "This nest has no emergence to split from." });
+    }
+
+    const source = await db.query(
+      "SELECT * FROM turtle_emergences WHERE id = $1 LIMIT 1;",
+      [current.emergence_id]
+    );
+    if (source.rows.length === 0) {
+      return res.status(400).json({ error: "The nest's current emergence record is missing." });
+    }
+    const base = source.rows[0];
+
+    // Overrides for the fields that are actually wrong when two nests were
+    // merged onto one emergence by mistake - everything else (track sketch,
+    // gps) carries over from the source record unchanged unless given here.
+    const beach = req.body?.beach ?? base.beach;
+    const event_date = req.body?.event_date ?? base.event_date;
+    const gps_lat = req.body?.gps_lat ?? base.gps_lat;
+    const gps_long = req.body?.gps_long ?? base.gps_long;
+    const distance_to_sea_s = req.body?.distance_to_sea_s ?? base.distance_to_sea_s;
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const created = await client.query(
+        `INSERT INTO turtle_emergences (gps_lat, gps_long, distance_to_sea_s, beach, event_date, track_sketch)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *;`,
+        [gps_lat || null, gps_long || null, distance_to_sea_s || null, beach, event_date, base.track_sketch]
+      );
+      const newEmergenceId = created.rows[0].id;
+
+      const updated = await client.query(
+        "UPDATE turtle_nests SET emergence_id = $1, updated_at = NOW() WHERE id = $2 RETURNING id, nest_code, emergence_id;",
+        [newEmergenceId, id]
+      );
+      await client.query("COMMIT");
+
+      await recordAudit(db, {
+        recordType: "nest",
+        recordId: id,
+        action: "updated",
+        req,
+        summary: `Given its own emergence record (was sharing emergence #${current.emergence_id} with other nests).`,
+      });
+
+      res.json({
+        message: "Nest given its own emergence record.",
+        nest: updated.rows[0],
+        emergence: created.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error("Split nest emergence error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Get all nests endpoint
 // Images excluded for performance â€” fetched individually via the single nest endpoint
 app.get("/nests", async (req, res) => {
