@@ -1,7 +1,15 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
+
+// A Postgres DATE column (e.g. shifts.work_date) has no time or timezone of
+// its own, but node-postgres's default parser turns it into a JS Date at
+// local midnight, and res.json() then serializes that via toISOString(),
+// converting to UTC - which rolls the date back by one for any server whose
+// local timezone is ahead of UTC. Returning the raw "YYYY-MM-DD" string keeps
+// the date exactly what the database has, with no timezone round-trip.
+types.setTypeParser(types.builtins.DATE, (val) => val);
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("node:crypto");
