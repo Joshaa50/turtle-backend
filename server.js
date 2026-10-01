@@ -2879,7 +2879,7 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
       [
         nest_code,
         total_num_eggs || null,
-        currentEggs || null,
+        currentEggs != null ? currentEggs : null,
         depth_top_egg_h,
         depth_bottom_chamber_h || null,
         distance_to_sea_s || null,
@@ -3057,7 +3057,7 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
     const result = await db.query(sql, [
       nest_code,
       total_num_eggs || null,
-      current_num_eggs || null,
+      current_num_eggs != null ? current_num_eggs : null,
 
       depth_top_egg_h,
       depth_bottom_chamber_h || null,
