@@ -5252,6 +5252,47 @@ app.delete("/reviews/:id", requireRole(...REVIEWERS), async (req, res) => {
 
 app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
 
+// Lets the person who submitted a rejected record put it back in the queue
+// after fixing it - self-service, no reviewer role needed, but only for their
+// own rejected rows. The record itself was already corrected via its own PUT
+// route before this is called; this only clears the rejection so it is
+// reviewed again.
+app.post("/reviews/:id/resubmit", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET status = 'pending', reviewed_by = NULL, reviewed_at = NULL, review_note = NULL,
+           submitted_at = NOW()
+       WHERE id = $1 AND status = 'rejected' AND submitted_by = $2
+       RETURNING id;`,
+      [id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      const existing = await db.query("SELECT status, submitted_by FROM record_reviews WHERE id = $1;", [id]);
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Review not found." });
+      }
+      if (String(existing.rows[0].submitted_by) !== String(req.user.id)) {
+        return res.status(403).json({ error: "You can only resubmit your own records." });
+      }
+      return res.status(409).json({
+        error: `Cannot resubmit - this record is currently ${existing.rows[0].status}.`,
+        status: existing.rows[0].status,
+      });
+    }
+
+    const full = await db.query(`${REVIEW_SELECT} WHERE r.id = $1;`, [id]);
+    const [review] = await describeReviewedRecords(full.rows);
+    res.json({ message: "Sent back for review.", review });
+  } catch (err) {
+    console.error("Resubmit review error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // What needs this person's attention. Nothing is stored per alert: pending
 // reviews are alerts until someone decides them, and a decision on your own
 // record is an alert until it is acknowledged. Acknowledgement is shared - one

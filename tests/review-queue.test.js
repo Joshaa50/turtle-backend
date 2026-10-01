@@ -197,6 +197,56 @@ describe('deciding on a submission', () => {
   });
 });
 
+describe('resubmitting a rejected submission', () => {
+  it('lets the submitter put their own rejected record back in the queue', async () => {
+    const res = await asVolunteer(request(app).post('/reviews/5/resubmit')).send({});
+
+    expect(res.status).toBe(200);
+    const call = query.mock.calls.find(([sql]) => String(sql).includes('UPDATE record_reviews'));
+    expect(call).toBeDefined();
+    expect(call[1]).toEqual(['5', '51']);
+  });
+
+  it('refuses to resubmit a record submitted by someone else', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('UPDATE record_reviews')) return Promise.resolve({ rows: [] });
+      if (text.includes('SELECT status, submitted_by FROM record_reviews')) {
+        return Promise.resolve({ rows: [{ status: 'rejected', submitted_by: 99 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asVolunteer(request(app).post('/reviews/5/resubmit')).send({});
+
+    expect(res.status).toBe(403);
+  });
+
+  it('reports a 409 when the record is not currently rejected', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('UPDATE record_reviews')) return Promise.resolve({ rows: [] });
+      if (text.includes('SELECT status, submitted_by FROM record_reviews')) {
+        return Promise.resolve({ rows: [{ status: 'pending', submitted_by: 51 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asVolunteer(request(app).post('/reviews/5/resubmit')).send({});
+
+    expect(res.status).toBe(409);
+    expect(res.body.status).toBe('pending');
+  });
+
+  it('reports a 404 when the review does not exist', async () => {
+    query.mockResolvedValue({ rows: [] });
+
+    const res = await asVolunteer(request(app).post('/reviews/999/resubmit')).send({});
+
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('cleaning up orphaned review rows', () => {
   const wroteReviewCascade = (spy, type) =>
     spy.mock.calls.some(
