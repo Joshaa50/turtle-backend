@@ -131,3 +131,39 @@ describe('reading shifts', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('deleting a shift type', () => {
+  it('deletes one with no timetable assignments', async () => {
+    query.mockResolvedValueOnce({ rowCount: 0, rows: [] }); // Timetable check
+    query.mockResolvedValueOnce({ rowCount: 1, rows: [{ shift_id: 8 }] }); // DELETE
+    const res = await asCoordinator(request(app).delete('/shifts/8'));
+    expect(res.status).toBe(200);
+    expect(String(query.mock.calls[1][0])).toContain('DELETE FROM shifts');
+  });
+
+  it('refuses to delete a shift with assignments on the timetable', async () => {
+    query.mockResolvedValueOnce({ rowCount: 1, rows: [{ 1: 1 }] }); // Timetable check finds one
+    const res = await asCoordinator(request(app).delete('/shifts/8'));
+    expect(res.status).toBe(400);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports 404 for a shift that does not exist', async () => {
+    query.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+    query.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+    const res = await asCoordinator(request(app).delete('/shifts/999'));
+    expect(res.status).toBe(404);
+  });
+
+  it('refuses a Field Leader - only a Coordinator may permanently delete', async () => {
+    const res = await asLeader(request(app).delete('/shifts/8'));
+    expect(res.status).toBe(403);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Field Assistant', async () => {
+    const res = await asAssistant(request(app).delete('/shifts/8'));
+    expect(res.status).toBe(403);
+    expect(query).not.toHaveBeenCalled();
+  });
+});

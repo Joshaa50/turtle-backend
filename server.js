@@ -4101,6 +4101,26 @@ app.patch("/shifts/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   }
 });
 
+// Removes a shift type outright, for the test/demo rows a retire leaves
+// behind forever otherwise (PATCH is_active=false hides a shift from new
+// pickers but keeps the row). Refused if any Timetable row still references
+// it - those assignments would otherwise point at nothing.
+app.delete("/shifts/:id", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const inUse = await db.query(`SELECT 1 FROM Timetable WHERE shift_id = $1 LIMIT 1;`, [id]);
+    if (inUse.rowCount > 0) {
+      return res.status(400).json({ error: "This shift type has assignments on the timetable and cannot be deleted. Retire it instead." });
+    }
+    const result = await db.query(`DELETE FROM shifts WHERE shift_id = $1 RETURNING shift_id;`, [id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: "Shift not found." });
+    res.json({ message: "Shift deleted successfully" });
+  } catch (err) {
+    console.error("Delete shift error:", err);
+    res.status(500).json({ error: "Server error while deleting the shift." });
+  }
+});
+
 // Timetable table
 //--------------------------------------------------------------
 
