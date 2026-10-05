@@ -40,8 +40,13 @@ const TOKEN_TTL = "12h";
 const COORDINATOR = "Project Coordinator";
 const LEADER = "Field Leader";
 
-const signToken = (user) =>
-  jwt.sign({ sub: String(user.id), role: user.role, email: user.email }, JWT_SECRET, {
+// `demo: true` marks a token issued by the one-click /demo/login buttons, so
+// routes that can do real damage to a real account can tell "an anonymous
+// visitor clicked Coordinator" from "Sofia Manthou signed in with her actual
+// password" - the two reach the same role but must not carry the same power
+// over other people's accounts.
+const signToken = (user, { demo = false } = {}) =>
+  jwt.sign({ sub: String(user.id), role: user.role, email: user.email, ...(demo ? { demo: true } : {}) }, JWT_SECRET, {
     expiresIn: TOKEN_TTL,
   });
 
@@ -50,6 +55,8 @@ const PUBLIC_ROUTES = [
   "GET /test",
   "POST /users/login",
   "POST /users/register",
+  "POST /users/request-password-reset",
+  "POST /users/request-reactivation",
   "GET /public/stats",
   "GET /public/stations",
   "GET /demo/accounts",
@@ -72,7 +79,7 @@ const requireAuth = (req, res, next) => {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = { id: payload.sub, role: payload.role, email: payload.email };
+    req.user = { id: payload.sub, role: payload.role, email: payload.email, demo: payload.demo === true };
     return next();
   } catch (err) {
     // Distinguish the two so the client can tell "log in again" from "something
@@ -618,9 +625,18 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
 });
 
 // Get user by ID
+// The only caller of this route is a user fetching their own profile right
+// after login - nothing in the app looks up another account's email, role or
+// active status by id. Scoped to self (or a Coordinator, who already manages
+// every account through User Management) so a Volunteer's token can't be
+// used to enumerate every other account on the project.
 app.get("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (String(req.user?.id) !== String(id) && req.user?.role !== COORDINATOR) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
 
     // Explicit columns - password_hash must never leave the server.
     const sql = `
@@ -764,7 +780,7 @@ app.post("/demo/login", async (req, res) => {
       return res.status(403).json({ error: "That demo account is inactive." });
     }
 
-    res.json({ message: "Demo login successful", token: signToken(user), user });
+    res.json({ message: "Demo login successful", token: signToken(user, { demo: true }), user });
   } catch (err) {
     console.error("Demo login error:", err);
     res.status(500).json({ error: "Server error." });
@@ -882,6 +898,14 @@ app.patch("/users/:id", async (req, res) => {
 
   if (!isPrivileged && !isSelf) {
     return res.status(403).json({ error: "You can only edit your own profile." });
+  }
+
+  // An anonymous visitor who clicked the public Coordinator/Field Leader demo
+  // button reaches this route with a real token at a real privileged role -
+  // but they never proved who they are, so they must not be able to reset,
+  // deactivate, erase or promote anyone else's actual account.
+  if (req.user.demo && isPrivileged && !isSelf) {
+    return res.status(403).json({ error: "Demo accounts cannot change other people's accounts." });
   }
 
   // Only a coordinator may create or change another coordinator, so a field
@@ -1385,6 +1409,13 @@ app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => 
 app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
+  // Irreversible, and confirmable just by typing an email address already
+  // visible in the list - an anonymous demo visitor must not be able to run
+  // this against anyone, including another demo account.
+  if (req.user.demo) {
+    return res.status(403).json({ error: "Demo accounts cannot erase anyone's account." });
+  }
 
   // Typing the address is the confirmation, the way deleting your own account
   // asks for a password. This cannot be undone and it is easy to run against
@@ -1904,6 +1935,28 @@ const listError = async (body, getCurrent = async () => ({})) => {
   };
   return (await check("species", lists.species, "Species")) ||
     (await check("health_condition", lists.health_conditions, "Health condition"));
+};
+
+// A record's beach decides what it counts toward in the Season Report and
+// per-beach stats, so a typo here doesn't just mislabel the record - it drops
+// it out of its real beach's totals silently. Same rule as listError: the
+// record's own already-stored value stays valid even if the beach was since
+// retired, but a new or changed value must be one of the active beaches.
+const beachError = async (body, getCurrent = async () => ({})) => {
+  const v = body.beach;
+  if (v === null || v === undefined || v === "") return null;
+  try {
+    const active = await db.query("SELECT 1 FROM beaches WHERE is_active = true AND LOWER(name) = LOWER($1) LIMIT 1;", [v]);
+    if (active.rows.length > 0) return null;
+    const current = await getCurrent();
+    if (current?.beach != null && String(current.beach).toLowerCase() === String(v).toLowerCase()) return null;
+    return `Beach "${v}" is not one of the configured beaches.`;
+  } catch (err) {
+    // Same fail-open as listError/readSetting: a lookup failure must not be
+    // the reason a volunteer's save is rejected on a beach.
+    console.error("Could not validate beach:", err.message);
+    return null;
+  }
 };
 
 // Alerts: derived from the review queue when read, so there is nothing to keep
@@ -2833,6 +2886,11 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: fieldError });
     }
 
+    const beachErr = await beachError(req.body);
+    if (beachErr) {
+      return res.status(400).json({ error: beachErr });
+    }
+
     const rangeError = invalidNest(req.body);
     if (rangeError) {
       return res.status(400).json({ error: rangeError });
@@ -2948,8 +3006,12 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
   }
 });
 
-// Update Nest endpoint
-app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
+// Update Nest endpoint. A Volunteer's own records go through the review
+// queue at creation and have no further route to a direct, unreviewed edit -
+// the frontend already hides the Edit button for that role (NestDetails
+// only shows it when role !== "Field Volunteer"); the server must enforce
+// the same line, not just the client.
+app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3028,6 +3090,11 @@ app.put("/nests/:id/update", requireRole(...RECORDERS), async (req, res) => {
       "SELECT nest_code, status, relocated, beach, total_num_eggs, current_num_eggs, is_archived FROM turtle_nests WHERE id = $1 LIMIT 1;",
       [id]
     );
+
+    const beachErr = await beachError(req.body, async () => before.rows[0] || {});
+    if (beachErr) {
+      return res.status(400).json({ error: beachErr });
+    }
 
     const sql = `
       UPDATE turtle_nests
@@ -3701,6 +3768,11 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: fieldError });
     }
 
+    const beachErr = await beachError(req.body);
+    if (beachErr) {
+      return res.status(400).json({ error: beachErr });
+    }
+
     const rangeError = outOfRange(req.body, EMERGENCE_RANGES);
     if (rangeError) {
       return res.status(400).json({ error: rangeError });
@@ -3802,6 +3874,13 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
     const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
+
+    const beachErr = await beachError(req.body, async () =>
+      (await db.query("SELECT beach FROM turtle_emergences WHERE id = $1 LIMIT 1;", [id])).rows[0] || {}
+    );
+    if (beachErr) {
+      return res.status(400).json({ error: beachErr });
+    }
 
     const rangeError = outOfRange(req.body, EMERGENCE_RANGES);
     if (rangeError) {

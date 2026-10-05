@@ -21,6 +21,15 @@
 //
 // (Destructive actions stay narrow for the same token: DELETE /nests/:id 403,
 // POST /timetable/create 403, PATCH /users/:other 403, PATCH self {role} 403.)
+//
+// Editing an EXISTING nest is narrower still, and deliberately so: creating
+// one already goes through the review queue (queueReview at POST
+// /nests/create), but there is no second review step for an edit - the
+// unique (record_type, record_id) constraint on record_reviews means a
+// second queueReview call on the same nest is a silent no-op. The frontend
+// already reflects this (NestDetails hides its Edit button for everyone
+// except role !== "Field Volunteer"), so PUT /nests/:id/update enforces the
+// same line: Coordinator, Field Leader and Field Assistant, not Volunteer.
 import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
@@ -108,7 +117,15 @@ describe('Field Volunteer — field-record writes', () => {
     expect(res.status).toBeLessThan(400);
   });
 
-  it('can update an existing nest', async () => {
+  it('can create a turtle record', async () => {
+    const res = await asVolunteer(request(app).post('/turtles/create')).send(turtleBody);
+
+    expect(res.status).toBeLessThan(400);
+  });
+});
+
+describe('Field Volunteer — cannot edit an existing nest', () => {
+  it('is refused on an existing nest even with a valid body', async () => {
     const res = await asVolunteer(request(app).put('/nests/42/update')).send({
       nest_code: 'QA-VOL-1',
       beach: 'Loggos 2',
@@ -121,13 +138,7 @@ describe('Field Volunteer — field-record writes', () => {
       status: 'incubating',
     });
 
-    expect(res.status).toBeLessThan(400);
-  });
-
-  it('can create a turtle record', async () => {
-    const res = await asVolunteer(request(app).post('/turtles/create')).send(turtleBody);
-
-    expect(res.status).toBeLessThan(400);
+    expect(res.status).toBe(403);
   });
 });
 
