@@ -2429,22 +2429,28 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: notInList });
     }
 
+    // A tagging visit records what was observed THAT visit, not a full
+    // re-filing of the turtle's identity. A flipper tag that wasn't checked
+    // comes through as a blank field here - COALESCE keeps the previously
+    // recorded value rather than erasing it, the same way name/species/sex
+    // already do below. Measurements are the one thing this route exists to
+    // overwrite, so those stay a plain replace.
     const sql = `
       UPDATE turtles
       SET
         health_condition = $1,
 
-        front_left_tag = $2,
-        front_left_address = $3,
+        front_left_tag = COALESCE(NULLIF($2, ''), front_left_tag),
+        front_left_address = COALESCE(NULLIF($3, ''), front_left_address),
 
-        front_right_tag = $4,
-        front_right_address = $5,
+        front_right_tag = COALESCE(NULLIF($4, ''), front_right_tag),
+        front_right_address = COALESCE(NULLIF($5, ''), front_right_address),
 
-        rear_left_tag = $6,
-        rear_left_address = $7,
+        rear_left_tag = COALESCE(NULLIF($6, ''), rear_left_tag),
+        rear_left_address = COALESCE(NULLIF($7, ''), rear_left_address),
 
-        rear_right_tag = $8,
-        rear_right_address = $9,
+        rear_right_tag = COALESCE(NULLIF($8, ''), rear_right_tag),
+        rear_right_address = COALESCE(NULLIF($9, ''), rear_right_address),
 
         scl_max = $10,
         scl_min = $11,
@@ -2470,17 +2476,17 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
     const result = await db.query(sql, [
       health_condition,
 
-      front_left_tag || null,
-      front_left_address || null,
+      front_left_tag || '',
+      front_left_address || '',
 
-      front_right_tag || null,
-      front_right_address || null,
+      front_right_tag || '',
+      front_right_address || '',
 
-      rear_left_tag || null,
-      rear_left_address || null,
+      rear_left_tag || '',
+      rear_left_address || '',
 
-      rear_right_tag || null,
-      rear_right_address || null,
+      rear_right_tag || '',
+      rear_right_address || '',
 
       scl_max ?? null,
       scl_min ?? null,
