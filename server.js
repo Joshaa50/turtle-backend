@@ -220,6 +220,31 @@ const outOfRange = (body, ranges) => {
   return null;
 };
 
+// Compared by calendar day in UTC, not instant, so "today" near midnight in
+// whichever timezone the field device is set to is never wrongly rejected.
+const futureDateError = (value, label) => {
+  if (value === null || value === undefined || value === "") return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null; // malformed dates are someone else's validation
+  const today = new Date();
+  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  const valueUTC = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return valueUTC > todayUTC ? `${label} cannot be in the future.` : null;
+};
+
+// A minimum measurement that exceeds its own maximum is not a smaller
+// animal, it is the two fields swapped - same check SCL and CCL both need.
+const minExceedsMaxError = (body) => {
+  for (const [minKey, maxKey, label] of [["scl_min", "scl_max", "SCL"], ["ccl_min", "ccl_max", "CCL"]]) {
+    const min = asNumber(body[minKey]);
+    const max = asNumber(body[maxKey]);
+    if (min !== null && max !== null && min > max) {
+      return `${label} MIN (${min}) cannot be greater than ${label} MAX (${max}).`;
+    }
+  }
+  return null;
+};
+
 // Range plus the two things a nest cannot be regardless of range: more eggs left
 // than were ever laid, and a chamber floor above its ceiling.
 const invalidNest = (body) => {
@@ -1531,6 +1556,11 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    const measurementErr = minExceedsMaxError(req.body);
+    if (measurementErr) {
+      return res.status(400).json({ error: measurementErr });
+    }
+
     const notInList = await listError(req.body);
     if (notInList) {
       return res.status(400).json({ error: notInList });
@@ -2475,6 +2505,11 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    const measurementErr = minExceedsMaxError(req.body);
+    if (measurementErr) {
+      return res.status(400).json({ error: measurementErr });
+    }
+
     const notInList = await listError(req.body, async () =>
       (await db.query("SELECT species, health_condition FROM turtles WHERE id = $1 LIMIT 1;", [id])).rows[0] || {}
     );
@@ -2729,6 +2764,16 @@ app.post("/turtle_survey_events/create", async (req, res) => {
       }
     }
 
+    const dateErr = futureDateError(event_date, "Event date");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
+    }
+
+    const measurementErr = minExceedsMaxError(req.body);
+    if (measurementErr) {
+      return res.status(400).json({ error: measurementErr });
+    }
+
     const sql = `
       INSERT INTO turtle_survey_events (
         event_date,
@@ -2879,6 +2924,11 @@ app.post("/nests/create", requireRole(...RECORDERS), async (req, res) => {
     // Required fields validation
     if (!nest_code || depth_top_egg_h == null || !date_found || !beach) {
       return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    const dateErr = futureDateError(date_found, "Date found");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
     }
 
     const fieldError = await checkFieldRequirements("nest", req.body);
@@ -3066,6 +3116,11 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
       return res.status(400).json({
         error: "Missing required fields."
       });
+    }
+
+    const dateErr = futureDateError(date_found, "Date found");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
     }
 
     const rangeError = invalidNest(req.body);
@@ -3763,6 +3818,11 @@ app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: "event_date is required." });
     }
 
+    const dateErr = futureDateError(event_date, "Observation date");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
+    }
+
     const fieldError = await checkFieldRequirements("emergence", req.body);
     if (fieldError) {
       return res.status(400).json({ error: fieldError });
@@ -3875,6 +3935,11 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
     const { id } = req.params;
     const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
 
+    const dateErr = futureDateError(event_date, "Observation date");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
+    }
+
     const beachErr = await beachError(req.body, async () =>
       (await db.query("SELECT beach FROM turtle_emergences WHERE id = $1 LIMIT 1;", [id])).rows[0] || {}
     );
@@ -3934,7 +3999,7 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
     await client.query("BEGIN");
 
     const nest = await client.query(
-      `SELECT id, nest_code FROM turtle_nests WHERE id = $1;`,
+      `SELECT id, nest_code, emergence_id FROM turtle_nests WHERE id = $1;`,
       [id]
     );
 
@@ -3960,6 +4025,24 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
       `DELETE FROM turtle_nests WHERE id = $1 RETURNING id, nest_code, beach;`,
       [id]
     );
+
+    // The nest's companion emergence (turtle_nests.emergence_id) is the
+    // record of the nesting event itself - track sketch, GPS, the find - not
+    // a second, independent sighting. Deleted after the nest row that
+    // referenced it so the FK is clear first; left behind, it reads as a
+    // phantom "false crawl" with no nest_code, inflating false-crawl counts.
+    const emergenceId = nest.rows[0].emergence_id;
+    if (emergenceId != null) {
+      await client.query(
+        `DELETE FROM morning_survey_emergences WHERE emergence_id = $1;`,
+        [emergenceId]
+      );
+      await client.query(
+        `DELETE FROM record_reviews WHERE record_type = 'emergence' AND record_id = $1;`,
+        [emergenceId]
+      );
+      await client.query(`DELETE FROM turtle_emergences WHERE id = $1;`, [emergenceId]);
+    }
 
     await client.query("COMMIT");
 

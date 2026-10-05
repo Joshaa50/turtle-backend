@@ -8,7 +8,7 @@
 //   - seasons may cross New Year, but may not overlap or run backwards
 //   - only a Project Coordinator can change either setting
 //   - auto-approve only fires when configured, and never names a reviewer
-import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import server from '../server.js';
@@ -26,6 +26,10 @@ let stored; // setting key -> value, as the database would hold it
 let query;
 
 beforeEach(() => {
+  // Fixed "now" well after every date literal below, so the new "no future
+  // dates" check on /emergences never rejects these as being ahead of
+  // whatever day this suite happens to actually run on.
+  vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
   stored = {};
   query = vi.spyOn(db, 'query').mockImplementation(async (sql, params) => {
     const text = String(sql);
@@ -39,6 +43,8 @@ beforeEach(() => {
     return { rows: [{ id: 42, event_date: '2026-06-01' }] };
   });
 });
+
+afterEach(() => vi.useRealTimers());
 
 afterAll(() => db.end().catch(() => {}));
 
