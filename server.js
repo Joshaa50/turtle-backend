@@ -140,6 +140,13 @@ const EMERGENCE_RANGES = {
   gps_long: LONG,
 };
 
+const MORNING_SURVEY_RANGES = {
+  tl_lat: LAT,
+  tl_long: LONG,
+  tr_lat: LAT,
+  tr_long: LONG,
+};
+
 const TURTLE_RANGES = {
   scl_max: MEASUREMENT,
   scl_min: MEASUREMENT,
@@ -4741,6 +4748,11 @@ app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: fieldError });
     }
 
+    const rangeError = outOfRange(req.body, MORNING_SURVEY_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
     const sql = `
       INSERT INTO morning_surveys (
         survey_date, start_time, end_time, beach_id,
@@ -4931,6 +4943,54 @@ app.get("/morning-surveys/:id", async (req, res) => {
     });
   } catch (err) {
     console.error("Get survey error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Correct a submitted survey - a mistyped corner GPS reading or nest tally is
+// the only thing this is for, not a way to rewrite history, so it only ever
+// touches the fields a field worker could have gotten wrong by hand.
+app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes } = req.body;
+
+    const rangeError = outOfRange(req.body, MORNING_SURVEY_RANGES);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
+    const result = await db.query(
+      `UPDATE morning_surveys
+       SET tl_lat               = COALESCE($1, tl_lat),
+           tl_long              = COALESCE($2, tl_long),
+           tr_lat               = COALESCE($3, tr_lat),
+           tr_long              = COALESCE($4, tr_long),
+           protected_nest_count = COALESCE($5, protected_nest_count),
+           notes                = COALESCE($6, notes)
+       WHERE id = $7
+       RETURNING *;`,
+      [
+        tl_lat != null ? parseFloat(tl_lat).toFixed(5) : null,
+        tl_long != null ? parseFloat(tl_long).toFixed(5) : null,
+        tr_lat != null ? parseFloat(tr_lat).toFixed(5) : null,
+        tr_long != null ? parseFloat(tr_long).toFixed(5) : null,
+        protected_nest_count ?? null,
+        notes ?? null,
+        id,
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Survey not found." });
+    }
+
+    await recordAudit(db, { recordType: "morning_survey", recordId: result.rows[0].id, action: "updated", req,
+      summary: "Survey corrected" });
+
+    res.json({ message: "Survey updated successfully", survey: result.rows[0] });
+  } catch (err) {
+    console.error("Update survey error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
