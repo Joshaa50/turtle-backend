@@ -85,6 +85,32 @@ describe('PATCH /morning-surveys/:id', () => {
     expect(res.status).toBe(403);
     expect(query).not.toHaveBeenCalled();
   });
+
+  // QA-031: a send-back for "times look too short" was previously impossible
+  // to act on - the edit form had no time fields because this route silently
+  // ignored them. Covers the fix end to end on the route itself.
+  it('corrects a submitted survey\'s start/end time', async () => {
+    const res = await request(app)
+      .patch('/morning-surveys/35')
+      .set('Authorization', `Bearer ${coordinatorToken}`)
+      .send({ start_time: '06:10', end_time: '07:45' });
+
+    expect(res.status).toBe(200);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE morning_surveys'),
+      expect.arrayContaining(['06:10', '07:45']),
+    );
+  });
+
+  it('rejects an end time that is not after the start time', async () => {
+    const res = await request(app)
+      .patch('/morning-surveys/35')
+      .set('Authorization', `Bearer ${coordinatorToken}`)
+      .send({ start_time: '07:45', end_time: '06:10' });
+
+    expect(res.status).toBe(400);
+    expect(query).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /morning-surveys range validation', () => {

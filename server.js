@@ -5154,17 +5154,26 @@ app.get("/morning-surveys/:id", async (req, res) => {
   }
 });
 
-// Correct a submitted survey - a mistyped corner GPS reading or nest tally is
-// the only thing this is for, not a way to rewrite history, so it only ever
-// touches the fields a field worker could have gotten wrong by hand.
+// Correct a submitted survey - a mistyped corner GPS reading, nest tally or
+// start/end time is what this is for, not a way to rewrite history (the
+// survey_date and beach stay fixed, since those identify which survey this
+// is), so it only ever touches the fields a field worker could have gotten
+// wrong by hand.
 app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
-    const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes } = req.body;
+    const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes, start_time, end_time } = req.body;
 
     const rangeError = outOfRange(req.body, MORNING_SURVEY_RANGES);
     if (rangeError) {
       return res.status(400).json({ error: rangeError });
+    }
+
+    // Same ordering check the creation form does client-side (MorningSurvey.tsx) -
+    // worth enforcing here too since this is the one path that lets a reviewer's
+    // "times look wrong" send-back actually get corrected.
+    if (start_time != null && end_time != null && end_time <= start_time) {
+      return res.status(400).json({ error: "End time must be after start time." });
     }
 
     const result = await db.query(
@@ -5174,8 +5183,10 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
            tr_lat               = COALESCE($3, tr_lat),
            tr_long              = COALESCE($4, tr_long),
            protected_nest_count = COALESCE($5, protected_nest_count),
-           notes                = COALESCE($6, notes)
-       WHERE id = $7
+           notes                = COALESCE($6, notes),
+           start_time           = COALESCE($7, start_time),
+           end_time             = COALESCE($8, end_time)
+       WHERE id = $9
        RETURNING *;`,
       [
         tl_lat != null ? parseFloat(tl_lat).toFixed(5) : null,
@@ -5184,6 +5195,8 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
         tr_long != null ? parseFloat(tr_long).toFixed(5) : null,
         protected_nest_count ?? null,
         notes ?? null,
+        start_time || null,
+        end_time || null,
         id,
       ]
     );
