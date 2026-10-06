@@ -617,6 +617,12 @@ app.post("/users/register", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields (including station)." });
     }
 
+    // Same floor the sign-up form enforces (QA-033) - a client-side message
+    // is only a UI nicety unless the server backs it up too.
+    if (password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters." });
+    }
+
     // A checkbox the client enforces is only a UI nicety - what actually
     // proves consent is the server refusing to create the account without it,
     // and the timestamp below is the record of when that happened.
