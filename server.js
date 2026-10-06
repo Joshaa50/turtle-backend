@@ -428,6 +428,25 @@ const recordAudit = async (executor, { recordType, recordId, action, req, summar
   }
 };
 
+// Whether this user is the one record_audit says created the record - the
+// only edit a Field Volunteer is allowed on a turtle or emergence straight
+// through its own update route, the same way "Edit & send back for review"
+// in My Submissions already works. Fails CLOSED (false) on a lookup error:
+// this guards who may write, not a validation nicety, so a DB hiccup must
+// deny rather than quietly let a stranger's edit through.
+const isOwnRecord = async (recordType, recordId, userId) => {
+  try {
+    const result = await db.query(
+      `SELECT actor_id FROM record_audit WHERE record_type = $1 AND record_id = $2 AND action = 'created' LIMIT 1;`,
+      [recordType, recordId]
+    );
+    return result.rows.length > 0 && result.rows[0].actor_id != null && String(result.rows[0].actor_id) === String(userId);
+  } catch (err) {
+    console.error("Could not verify record ownership:", err.message);
+    return false;
+  }
+};
+
 
 
 // The record types that can carry a review. Keyed by the table the id belongs
@@ -3999,10 +4018,23 @@ app.get("/emergences/:id", async (req, res) => {
 //
 // Only the fields a correction would touch. Everything COALESCEs, so a partial
 // body leaves the rest of the row alone.
+//
+// Unlike a turtle, an emergence is a one-time sighting, not something other
+// people go on to add their own encounters to - there is no legitimate open
+// flow (the way TaggingEntry's "Existing Turtle" is for turtles), so Records
+// hides its own "Edit record" button for role !== "Field Volunteer". A
+// Volunteer reaching this route directly is only legitimate for their own
+// record, through My Submissions > "Edit & send back for review" - same
+// ownership record_audit already provides for that flow's ownership check
+// on resubmit.
 app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
     const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
+
+    if (req.user.role === VOLUNTEER && !(await isOwnRecord("emergence", id, req.user.id))) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
 
     const dateErr = futureDateError(event_date, "Observation date");
     if (dateErr) {
