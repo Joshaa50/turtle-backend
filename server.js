@@ -3622,6 +3622,40 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
 });
 
 // Get all turtle nest events for a given nest_code
+// QA-024: Season Report asked for every nest's events one at a time - 26
+// separate GET /nest-events/<code> round trips (and growing with every
+// season), ~3s before anything renders. One call for every requested code
+// at once, grouped by nest_code, is what the report actually needs: all of
+// a season's (and the comparison season's) nest events together.
+app.get("/nest-events", async (req, res) => {
+  try {
+    const codes = String(req.query.codes || "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+
+    if (codes.length === 0) {
+      return res.status(400).json({ error: "codes is required (comma-separated nest codes)." });
+    }
+
+    const result = await db.query(
+      `SELECT * FROM turtle_nest_events WHERE nest_code = ANY($1::text[]) ORDER BY created_at DESC;`,
+      [codes]
+    );
+
+    const eventsByCode = {};
+    for (const code of codes) eventsByCode[code] = [];
+    for (const row of result.rows) {
+      (eventsByCode[row.nest_code] ||= []).push(row);
+    }
+
+    res.json({ message: "Nest events retrieved successfully", eventsByCode });
+  } catch (err) {
+    console.error("Get bulk nest events error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 app.get("/nest-events/:nest_code", async (req, res) => {
   try {
     const { nest_code } = req.params;
@@ -4872,11 +4906,18 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
   }
 
   try {
+    // QA-026: the trail only ever stored actor_email, so "Recorded by" showed
+    // an email address instead of a name. Joining to users by actor_id (kept
+    // on every row already, including old ones) recovers the name without a
+    // migration; a row whose actor account was later deleted still has the
+    // email to fall back on.
     const result = await db.query(
-      `SELECT id, record_type, record_id, action, actor_id, actor_email, actor_role, summary, occurred_at
-       FROM record_audit
-       WHERE record_type = $1 AND record_id = $2
-       ORDER BY occurred_at DESC, id DESC
+      `SELECT a.id, a.record_type, a.record_id, a.action, a.actor_id, a.actor_email, a.actor_role,
+              a.summary, a.occurred_at, u.first_name AS actor_first_name, u.last_name AS actor_last_name
+       FROM record_audit a
+       LEFT JOIN users u ON u.id = a.actor_id
+       WHERE a.record_type = $1 AND a.record_id = $2
+       ORDER BY occurred_at DESC, a.id DESC
        LIMIT 200;`,
       [recordType, Number(recordId)]
     );
