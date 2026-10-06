@@ -45,10 +45,15 @@ const LEADER = "Field Leader";
 // visitor clicked Coordinator" from "Sofia Manthou signed in with her actual
 // password" - the two reach the same role but must not carry the same power
 // over other people's accounts.
+// jti gives each token its own identity, so a single one can be revoked
+// (logout) without touching every other token the same person holds on
+// other devices or tabs.
 const signToken = (user, { demo = false } = {}) =>
-  jwt.sign({ sub: String(user.id), role: user.role, email: user.email, ...(demo ? { demo: true } : {}) }, JWT_SECRET, {
-    expiresIn: TOKEN_TTL,
-  });
+  jwt.sign(
+    { sub: String(user.id), role: user.role, email: user.email, jti: crypto.randomUUID(), ...(demo ? { demo: true } : {}) },
+    JWT_SECRET,
+    { expiresIn: TOKEN_TTL }
+  );
 
 // Routes reachable without a token, as "METHOD /path" or a RegExp.
 const PUBLIC_ROUTES = [
@@ -68,7 +73,7 @@ const isPublic = (req) => {
   return PUBLIC_ROUTES.some((r) => (r instanceof RegExp ? r.test(target) : r === target));
 };
 
-const requireAuth = (req, res, next) => {
+const requireAuth = async (req, res, next) => {
   // The browser's CORS preflight carries no Authorization header by design.
   if (req.method === "OPTIONS") return next();
   if (isPublic(req)) return next();
@@ -79,7 +84,27 @@ const requireAuth = (req, res, next) => {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = { id: payload.sub, role: payload.role, email: payload.email, demo: payload.demo === true };
+    req.user = {
+      id: payload.sub, role: payload.role, email: payload.email,
+      demo: payload.demo === true, jti: payload.jti, exp: payload.exp,
+    };
+
+    // A token stays structurally valid for its whole 12h TTL even after the
+    // person signed out - logout has nowhere else to take that back, since
+    // the token itself cannot be un-issued. revoked_tokens is that "take
+    // back": checked on every request, fails open on a lookup error (a DB
+    // hiccup must not lock out every signed-in person at once).
+    if (payload.jti) {
+      try {
+        const revoked = await db.query("SELECT 1 FROM revoked_tokens WHERE jti = $1 LIMIT 1;", [payload.jti]);
+        if (revoked.rows.length > 0) {
+          return res.status(401).json({ error: "Session ended. Please sign in again.", expired: true });
+        }
+      } catch (err) {
+        console.error("Revocation check failed:", err.message);
+      }
+    }
+
     return next();
   } catch (err) {
     // Distinguish the two so the client can tell "log in again" from "something
@@ -463,6 +488,27 @@ app.get("/test", (req, res) => {
   res.json({ message: "Backend is working!" });
 });
 
+// Revoked tokens
+//--------------------------------------------------------------
+// requireAuth's take-back for logout: a token is only ever un-issued by
+// landing its jti here until the token would have expired anyway, at which
+// point it is dead on its own and the row is just cleanup.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS revoked_tokens (
+          jti TEXT PRIMARY KEY,
+          expires_at TIMESTAMPTZ NOT NULL
+        );
+      `);
+      console.log("revoked_tokens is present.");
+    } catch (err) {
+      console.error("Could not ensure revoked_tokens:", err.message);
+    }
+  })();
+}
+
 // Users table
 //--------------------------------------------------------------
 // Records when someone agreed to the data notice shown at sign-up, so there is
@@ -742,6 +788,29 @@ app.post("/users/login", async (req, res) => {
     });
   } catch (err) {
     console.error("Login error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Ends this one token's session, immediately - not just on this device, since
+// the token (not the device) is what a copied Authorization header would
+// replay. Other tokens the same person holds (another tab signed in
+// separately, another device) are unaffected; each has its own jti.
+app.post("/users/logout", async (req, res) => {
+  try {
+    if (req.user?.jti && req.user?.exp) {
+      await db.query(
+        `INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, to_timestamp($2))
+         ON CONFLICT (jti) DO NOTHING;`,
+        [req.user.jti, req.user.exp]
+      );
+    }
+    // Housekeeping, not correctness - a row past its own token's expiry is
+    // already harmless, this just keeps the table from growing forever.
+    db.query("DELETE FROM revoked_tokens WHERE expires_at < NOW();").catch(() => {});
+    res.json({ message: "Logged out." });
+  } catch (err) {
+    console.error("Logout error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
