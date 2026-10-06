@@ -1586,156 +1586,96 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
 
 // Turtles table
 //--------------------------------------------------------------
+// Validates and inserts one turtle row. `executor` is the pool or an open
+// transaction client, so POST /turtles/create-with-event (QA-027) can run
+// this and insertTurtleSurveyEvent in the same transaction - a brand new
+// turtle whose first encounter fails validation used to stay committed
+// anyway, an orphan with no events, invisible in Turtle Records and (worse)
+// holding tags that then blocked the corrected retry from using them.
+// Returns { row } or { error }; only throws on an actual DB failure.
+const insertTurtle = async (executor, body) => {
+  let {
+    name, species, sex, health_condition,
+    front_left_tag, front_left_address,
+    front_right_tag, front_right_address,
+    rear_left_tag, rear_left_address,
+    rear_right_tag, rear_right_address,
+    scl_max, scl_min, scw,
+    ccl_max, ccl_min, ccw,
+    tail_extension, vent_to_tail_tip, total_tail_length,
+  } = body;
+
+  sex = sex ? sex.toLowerCase() : "unknown";
+  if (!["male", "female", "unknown"].includes(sex)) {
+    return { error: "sex must be 'male', 'female', or 'unknown'" };
+  }
+  if (!species || !health_condition) {
+    return { error: "Missing required fields." };
+  }
+
+  const fieldError = await checkFieldRequirements("turtle", body);
+  if (fieldError) return { error: fieldError };
+
+  const rangeError = outOfRange(body, TURTLE_RANGES);
+  if (rangeError) return { error: rangeError };
+
+  const measurementErr = minExceedsMaxError(body);
+  if (measurementErr) return { error: measurementErr };
+
+  const notInList = await listError(body);
+  if (notInList) return { error: notInList };
+
+  const sql = `
+    INSERT INTO turtles (
+      name, species, sex, health_condition,
+      front_left_tag, front_left_address,
+      front_right_tag, front_right_address,
+      rear_left_tag, rear_left_address,
+      rear_right_tag, rear_right_address,
+      scl_max, scl_min, scw,
+      ccl_max, ccl_min, ccw,
+      tail_extension, vent_to_tail_tip, total_tail_length
+    )
+    VALUES (
+      $1, $2, $3, $4,
+      $5, $6,
+      $7, $8,
+      $9, $10,
+      $11, $12,
+      $13, $14, $15,
+      $16, $17, $18,
+      $19, $20, $21
+    )
+    RETURNING *;
+  `;
+
+  const result = await executor.query(sql, [
+    name || null, species, sex, health_condition,
+    front_left_tag || null, front_left_address || null,
+    front_right_tag || null, front_right_address || null,
+    rear_left_tag || null, rear_left_address || null,
+    rear_right_tag || null, rear_right_address || null,
+    scl_max ?? null, scl_min ?? null, scw ?? null,
+    ccl_max ?? null, ccl_min ?? null, ccw ?? null,
+    tail_extension ?? null, vent_to_tail_tip ?? null, total_tail_length ?? null,
+  ]);
+
+  return { row: result.rows[0] };
+};
+
 // Create Turtle endpoint
 app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
   try {
-    let {
-      name,
-      species,
-      sex,
-      health_condition,
+    const { error, row } = await insertTurtle(db, req.body);
+    if (error) return res.status(400).json({ error });
 
-      front_left_tag,
-      front_left_address,
-
-      front_right_tag,
-      front_right_address,
-
-      rear_left_tag,
-      rear_left_address,
-
-      rear_right_tag,
-      rear_right_address,
-
-      scl_max,
-      scl_min,
-      scw,
-
-      ccl_max,
-      ccl_min,
-      ccw,
-
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length
-    } = req.body;
-
-    sex = sex ? sex.toLowerCase() : "unknown";
-
-    if (!["male", "female", "unknown"].includes(sex)) {
-      return res.status(400).json({
-        error: "sex must be 'male', 'female', or 'unknown'"
-      });
-    }
-
-    if (!species || !health_condition) {
-      return res.status(400).json({
-        error: "Missing required fields."
-      });
-    }
-
-    const fieldError = await checkFieldRequirements("turtle", req.body);
-    if (fieldError) {
-      return res.status(400).json({ error: fieldError });
-    }
-
-    const rangeError = outOfRange(req.body, TURTLE_RANGES);
-    if (rangeError) {
-      return res.status(400).json({ error: rangeError });
-    }
-
-    const measurementErr = minExceedsMaxError(req.body);
-    if (measurementErr) {
-      return res.status(400).json({ error: measurementErr });
-    }
-
-    const notInList = await listError(req.body);
-    if (notInList) {
-      return res.status(400).json({ error: notInList });
-    }
-
-    const sql = `
-      INSERT INTO turtles (
-        name,
-        species,
-        sex,
-        health_condition,
-
-        front_left_tag,
-        front_left_address,
-
-        front_right_tag,
-        front_right_address,
-
-        rear_left_tag,
-        rear_left_address,
-
-        rear_right_tag,
-        rear_right_address,
-
-        scl_max,
-        scl_min,
-        scw,
-
-        ccl_max,
-        ccl_min,
-        ccw,
-
-        tail_extension,
-        vent_to_tail_tip,
-        total_tail_length
-      )
-      VALUES (
-        $1, $2, $3, $4,
-        $5, $6,
-        $7, $8,
-        $9, $10,
-        $11, $12,
-        $13, $14, $15,
-        $16, $17, $18,
-        $19, $20, $21
-      )
-      RETURNING *;
-    `;
-
-    const result = await db.query(sql, [
-      name || null,
-      species,
-      sex,
-      health_condition,
-
-      front_left_tag || null,
-      front_left_address || null,
-
-      front_right_tag || null,
-      front_right_address || null,
-
-      rear_left_tag || null,
-      rear_left_address || null,
-
-      rear_right_tag || null,
-      rear_right_address || null,
-
-      scl_max ?? null,
-      scl_min ?? null,
-      scw ?? null,
-
-      ccl_max ?? null,
-      ccl_min ?? null,
-      ccw ?? null,
-
-      tail_extension ?? null,
-      vent_to_tail_tip ?? null,
-      total_tail_length ?? null
-    ]);
-
-    const review = await queueReviewSafely("turtle", result.rows[0]?.id, req);
-    await recordAudit(db, { recordType: "turtle", recordId: result.rows[0]?.id, action: "created", req,
-      summary: result.rows[0]?.name ? `Turtle "${result.rows[0].name}"` : null });
+    const review = await queueReviewSafely("turtle", row.id, req);
+    await recordAudit(db, { recordType: "turtle", recordId: row.id, action: "created", req,
+      summary: row.name ? `Turtle "${row.name}"` : null });
 
     res.json({
       message: "Turtle record created successfully",
-      turtle: result.rows[0],
+      turtle: row,
       review
     });
   } catch (err) {
@@ -2800,166 +2740,158 @@ app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) =>
 // Turtle Survey events table
 //--------------------------------------------------------------
 // Create Turtle Survey Event endpoint
+// Validates and inserts one survey event row. `executor` is the pool or an
+// open transaction client - see insertTurtle's comment; this is its other
+// half for POST /turtles/create-with-event. Returns { row } or { error }.
+const insertTurtleSurveyEvent = async (executor, body) => {
+  const {
+    event_date, event_type, location, turtle_id,
+    front_left_tag, front_left_address,
+    front_right_tag, front_right_address,
+    rear_left_tag, rear_left_address,
+    rear_right_tag, rear_right_address,
+    scl_max, scl_min, scw,
+    ccl_max, ccl_min, ccw,
+    tail_extension, vent_to_tail_tip, total_tail_length,
+    health_condition, observer, notes,
+    time_first_seen, time_start_egg_laying, time_covering,
+    time_end_camouflage, time_reach_sea,
+  } = body;
+
+  const requiredFields = [
+    "event_type", "location", "turtle_id",
+    "scl_max", "scl_min", "scw",
+    "ccl_max", "ccl_min", "ccw",
+    "tail_extension", "vent_to_tail_tip", "total_tail_length",
+    "health_condition", "observer"
+  ];
+  for (const field of requiredFields) {
+    if (body[field] === undefined || body[field] === null) {
+      return { error: `${field} is required` };
+    }
+  }
+
+  const dateErr = futureDateError(event_date, "Event date");
+  if (dateErr) return { error: dateErr };
+
+  const measurementErr = minExceedsMaxError(body);
+  if (measurementErr) return { error: measurementErr };
+
+  const sql = `
+    INSERT INTO turtle_survey_events (
+      event_date, event_type, location, turtle_id,
+      front_left_tag, front_left_address,
+      front_right_tag, front_right_address,
+      rear_left_tag, rear_left_address,
+      rear_right_tag, rear_right_address,
+      scl_max, scl_min, scw,
+      ccl_max, ccl_min, ccw,
+      tail_extension, vent_to_tail_tip, total_tail_length,
+      health_condition, observer, notes,
+      time_first_seen, time_start_egg_laying, time_covering,
+      time_end_camouflage, time_reach_sea
+    )
+    VALUES (
+      $1,$2,$3,$4,
+      $5,$6,$7,$8,$9,$10,$11,$12,
+      $13,$14,$15,$16,$17,$18,$19,$20,$21,
+      $22,$23,$24,$25,$26,$27,$28,$29
+    )
+    RETURNING *;
+  `;
+
+  const values = [
+    event_date || new Date(), event_type, location, turtle_id,
+    front_left_tag || null, front_left_address || null,
+    front_right_tag || null, front_right_address || null,
+    rear_left_tag || null, rear_left_address || null,
+    rear_right_tag || null, rear_right_address || null,
+    scl_max, scl_min, scw,
+    ccl_max, ccl_min, ccw,
+    tail_extension, vent_to_tail_tip, total_tail_length,
+    health_condition, observer, notes || null,
+    time_first_seen || null, time_start_egg_laying || null, time_covering || null,
+    time_end_camouflage || null, time_reach_sea || null,
+  ];
+
+  const result = await executor.query(sql, values);
+  return { row: result.rows[0] };
+};
+
 app.post("/turtle_survey_events/create", async (req, res) => {
   try {
-    const {
-      event_date,
-      event_type,
-      location,
-      turtle_id,
-
-      front_left_tag,
-      front_left_address,
-      front_right_tag,
-      front_right_address,
-      rear_left_tag,
-      rear_left_address,
-      rear_right_tag,
-      rear_right_address,
-
-      scl_max,
-      scl_min,
-      scw,
-      ccl_max,
-      ccl_min,
-      ccw,
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length,
-
-      health_condition,
-      observer,
-      notes,
-
-      time_first_seen,
-      time_start_egg_laying,
-      time_covering,
-      time_end_camouflage,
-      time_reach_sea
-    } = req.body;
-
-    const requiredFields = [
-      "event_type", "location", "turtle_id",
-      "scl_max", "scl_min", "scw",
-      "ccl_max", "ccl_min", "ccw",
-      "tail_extension", "vent_to_tail_tip", "total_tail_length",
-      "health_condition", "observer"
-    ];
-
-    for (const field of requiredFields) {
-      if (req.body[field] === undefined || req.body[field] === null) {
-        return res.status(400).json({ error: `${field} is required` });
-      }
-    }
-
-    const dateErr = futureDateError(event_date, "Event date");
-    if (dateErr) {
-      return res.status(400).json({ error: dateErr });
-    }
-
-    const measurementErr = minExceedsMaxError(req.body);
-    if (measurementErr) {
-      return res.status(400).json({ error: measurementErr });
-    }
-
-    const sql = `
-      INSERT INTO turtle_survey_events (
-        event_date,
-        event_type,
-        location,
-        turtle_id,
-
-        front_left_tag,
-        front_left_address,
-        front_right_tag,
-        front_right_address,
-        rear_left_tag,
-        rear_left_address,
-        rear_right_tag,
-        rear_right_address,
-
-        scl_max,
-        scl_min,
-        scw,
-        ccl_max,
-        ccl_min,
-        ccw,
-        tail_extension,
-        vent_to_tail_tip,
-        total_tail_length,
-
-        health_condition,
-        observer,
-        notes,
-
-        time_first_seen,
-        time_start_egg_laying,
-        time_covering,
-        time_end_camouflage,
-        time_reach_sea
-      )
-      VALUES (
-        $1,$2,$3,$4,
-        $5,$6,$7,$8,$9,$10,$11,$12,
-        $13,$14,$15,$16,$17,$18,$19,$20,$21,
-        $22,$23,$24,$25,$26,$27,$28,$29
-      )
-      RETURNING *;
-    `;
-
-    const values = [
-      event_date || new Date(),
-      event_type,
-      location,
-      turtle_id,
-
-      front_left_tag || null,
-      front_left_address || null,
-      front_right_tag || null,
-      front_right_address || null,
-      rear_left_tag || null,
-      rear_left_address || null,
-      rear_right_tag || null,
-      rear_right_address || null,
-
-      scl_max,
-      scl_min,
-      scw,
-      ccl_max,
-      ccl_min,
-      ccw,
-      tail_extension,
-      vent_to_tail_tip,
-      total_tail_length,
-
-      health_condition,
-      observer,
-      notes || null,
-
-      time_first_seen || null,
-      time_start_egg_laying || null,
-      time_covering || null,
-      time_end_camouflage || null,
-      time_reach_sea || null
-    ];
-
-    const result = await db.query(sql, values);
+    const { error, row } = await insertTurtleSurveyEvent(db, req.body);
+    if (error) return res.status(400).json({ error });
 
     await recordAudit(db, {
       recordType: "turtle_survey_event",
-      recordId: result.rows[0]?.id,
+      recordId: row.id,
       action: "created",
       req,
-      summary: `${result.rows[0]?.event_type || "Encounter"} of turtle ${turtle_id}${location ? ` at ${location}` : ""}`,
+      summary: `${req.body.event_type || "Encounter"} of turtle ${req.body.turtle_id}${req.body.location ? ` at ${req.body.location}` : ""}`,
     });
 
     res.json({
       message: "Turtle survey event created successfully",
-      event: result.rows[0]
+      event: row
     });
   } catch (err) {
     console.error("Create turtle survey event error:", err);
     res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Creates a brand new turtle and its first encounter atomically (QA-027).
+// TaggingEntry's "New Turtle" flow used to be two separate requests: a
+// failed second request (most often the event's own future-date or
+// measurement validation) left the turtle from the first request committed
+// anyway - an orphan with no events, invisible in Turtle Records, and
+// holding onto tag numbers that then blocked the corrected retry from
+// reusing them. One transaction: either both rows land, or neither does.
+app.post("/turtles/create-with-event", requireRole(...RECORDERS), async (req, res) => {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    const turtleResult = await insertTurtle(client, req.body);
+    if (turtleResult.error) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: turtleResult.error });
+    }
+    const turtle = turtleResult.row;
+
+    const eventResult = await insertTurtleSurveyEvent(client, { ...req.body, turtle_id: turtle.id });
+    if (eventResult.error) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: eventResult.error });
+    }
+    const event = eventResult.row;
+
+    await client.query("COMMIT");
+
+    // Best-effort side effects, same as the two standalone routes - a
+    // failure here is a gap in the review queue or audit trail, never a
+    // reason to undo a save that already committed.
+    const review = await queueReviewSafely("turtle", turtle.id, req);
+    await recordAudit(db, { recordType: "turtle", recordId: turtle.id, action: "created", req,
+      summary: turtle.name ? `Turtle "${turtle.name}"` : null });
+    await recordAudit(db, {
+      recordType: "turtle_survey_event", recordId: event.id, action: "created", req,
+      summary: `${req.body.event_type || "Encounter"} of turtle ${turtle.id}${req.body.location ? ` at ${req.body.location}` : ""}`,
+    });
+
+    res.json({
+      message: "Turtle and encounter created successfully",
+      turtle,
+      event,
+      review,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Create turtle with event error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
   }
 });
 
