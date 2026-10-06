@@ -5538,6 +5538,38 @@ app.delete("/reviews/:id", requireRole(...REVIEWERS), async (req, res) => {
 
 app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
 
+// Approves several reviews in one request - a morning survey walk across
+// several beaches queues one review per beach (QA-034), and a reviewer who
+// has already looked at all of them should not have to click Approve N
+// times. Only ever approves rows still pending; anything already decided
+// (by this reviewer's own earlier single-item click, or by someone else) is
+// reported back rather than erroring the whole batch out.
+app.post("/reviews/bulk-approve", requireRole(...REVIEWERS), async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ error: "No review ids given." });
+    }
+
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET status = 'approved', reviewed_by = $1, reviewed_at = NOW()
+       WHERE id = ANY($2::int[]) AND status = 'pending'
+       RETURNING id;`,
+      [req.user.id, ids]
+    );
+    const approvedIds = result.rows.map((r) => r.id);
+    const skippedIds = ids.filter((id) => !approvedIds.includes(id));
+
+    const full = await db.query(`${REVIEW_SELECT} WHERE r.id = ANY($1::int[]);`, [approvedIds]);
+    const reviews = await describeReviewedRecords(full.rows);
+    res.json({ message: `${approvedIds.length} record(s) approved.`, reviews, skippedIds });
+  } catch (err) {
+    console.error("Bulk approve error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Lets the person who submitted a rejected record put it back in the queue
 // after fixing it - self-service, no reviewer role needed, but only for their
 // own rejected rows. The record itself was already corrected via its own PUT

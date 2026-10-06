@@ -197,6 +197,52 @@ describe('deciding on a submission', () => {
   });
 });
 
+describe('bulk-approving several reviews at once (QA-034)', () => {
+  it('lets a Field Leader approve several in one request', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('UPDATE record_reviews')) {
+        return Promise.resolve({ rows: [{ id: 5 }, { id: 6 }, { id: 7 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6, 7] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviews).toBeDefined();
+    expect(res.body.skippedIds).toEqual([]);
+  });
+
+  it('refuses a volunteer', async () => {
+    const res = await asVolunteer(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6] });
+
+    expect(res.status).toBe(403);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE record_reviews'), expect.anything());
+  });
+
+  it('rejects an empty id list instead of updating everything', async () => {
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [] });
+
+    expect(res.status).toBe(400);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE record_reviews'), expect.anything());
+  });
+
+  it('reports ids already decided by someone else rather than failing the whole batch', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      // Only 5 and 7 are still pending; 6 was already approved by someone else.
+      if (text.includes('UPDATE record_reviews')) return Promise.resolve({ rows: [{ id: 5 }, { id: 7 }] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6, 7] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.skippedIds).toEqual([6]);
+  });
+});
+
 describe('resubmitting a rejected submission', () => {
   it('lets the submitter put their own rejected record back in the queue', async () => {
     const res = await asVolunteer(request(app).post('/reviews/5/resubmit')).send({});
