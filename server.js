@@ -4356,7 +4356,13 @@ app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res)
     });
   } catch (err) {
     console.error("Create assignment error:", err);
-    res.status(500).json({ error: 'Database error. Check if user_id and shift_id exist.' });
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "This person is already assigned to that shift on that date." });
+    }
+    if (err.code === "23503") {
+      return res.status(400).json({ error: "Database error. Check if user_id and shift_id exist." });
+    }
+    res.status(500).json({ error: "Server error." });
   }
 });
 
