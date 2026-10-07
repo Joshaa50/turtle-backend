@@ -720,6 +720,28 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
   }
 });
 
+// A names-only directory for the Observer picker on Tag a Turtle / Record
+// Inventory. Those forms used to call GET /users for this, which worked
+// until that route was tightened to Coordinator/Field Leader only (QA-002) -
+// after that a Field Assistant's own Observer dropdown came back empty and
+// the record couldn't be saved at all (QA-043). This carries none of the
+// directory's sensitive fields (email, active/verification flags, etc.), so
+// any recording role can call it.
+app.get("/users/observers", requireRole(...RECORDERS), async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, first_name, last_name, role, station, is_active
+       FROM users
+       WHERE is_active = true
+       ORDER BY station ASC, last_name ASC;`
+    );
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error("Get observers error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Get user by ID
 // The only caller of this route is a user fetching their own profile right
 // after login - nothing in the app looks up another account's email, role or
