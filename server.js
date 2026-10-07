@@ -4140,7 +4140,11 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 // those would strip data off a nest that is still in the season's records, so
 // this refuses and names the nest instead of cascading. Links from morning
 // surveys are just join rows and are removed with it.
-app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
+// QA-042: a Field Assistant could delete any emergence via the API even
+// though the UI never offers it to them (only "Edit record") - the same
+// class of gap as QA-001/QA-030, and inconsistent with FA already getting
+// 403 on DELETE /nests and DELETE /turtles.
+app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
@@ -4182,6 +4186,16 @@ app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"
     }
 
     await client.query("COMMIT");
+
+    // QA-042: deletion wasn't audited at all - the trail went silent after
+    // "created", so there was no record of who removed it.
+    await recordAudit(db, {
+      recordType: "emergence",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: emergence.rows[0].beach ? `Emergence at ${emergence.rows[0].beach}` : null,
+    });
 
     res.json({
       message: "Emergence deleted successfully",
