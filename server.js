@@ -2427,7 +2427,11 @@ const queueReviewSafely = async (recordType, recordId, req) => {
   }
 };
 
-app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
+// QA-064: a Field Assistant could archive or restore any turtle via the API
+// even though the UI never offers it to them - the same class of gap as
+// QA-001/QA-030/QA-042, and inconsistent with FA already getting 403 on
+// DELETE /turtles/:id.
+app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER), async (req, res) => {
   try {
     const { id } = req.params;
     const archived = req.body?.archived !== false; // default to archiving
