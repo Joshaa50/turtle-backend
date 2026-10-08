@@ -752,6 +752,12 @@ app.get("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
+    // QA-060: a non-numeric id (e.g. "abc") reached the query as-is, which
+    // Postgres rejects with an invalid-integer-input error - caught by the
+    // generic handler below as an opaque 500. Same guard already used by
+    // the neighbouring /users/:id/data-export route.
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
     if (String(req.user?.id) !== String(id) && req.user?.role !== COORDINATOR) {
       return res.status(403).json({ error: "You do not have permission to do that." });
     }
@@ -2215,8 +2221,18 @@ const FORM_FIELD_SCHEMA = {
     rear_left_tag: { keys: ["rear_left_tag", "rear_left_address"], label: "Rear-left tag", default: "recommended" },
     rear_right_tag: { keys: ["rear_right_tag", "rear_right_address"], label: "Rear-right tag", default: "recommended" },
     measurements: {
-      keys: ["scl_max", "scl_min", "scw", "ccl_max", "ccl_min", "ccw", "tail_extension", "vent_to_tail_tip", "total_tail_length"],
+      keys: ["scl_max", "scl_min", "scw", "ccl_max", "ccl_min", "ccw"],
       label: "Measurements", default: "required",
+    },
+    // QA-063: these used to be bundled into "measurements" above, all-or-
+    // nothing - a turtle whose tail was damaged or who bolted before it could
+    // be measured could not be saved at all. Split out so a coordinator can
+    // require them independently of the core carapace numbers; default stays
+    // "recommended" so an unconfigured project behaves as it always should
+    // have (core measurements required, tail ones not blocking).
+    tail_measurements: {
+      keys: ["tail_extension", "vent_to_tail_tip", "total_tail_length"],
+      label: "Tail measurements", default: "recommended",
     },
   },
   morning_survey: {
@@ -2750,6 +2766,17 @@ app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) =>
     }
 
     await client.query("COMMIT");
+
+    // Extends the "deleted" audit entry already written for emergence
+    // deletes (QA-042) to nests and turtles too - without it, the trail went
+    // silent after "created" and there was no record of who removed either.
+    await recordAudit(db, {
+      recordType: "turtle",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: turtle.rows[0].name ? `Turtle ${turtle.rows[0].name}` : null,
+    });
 
     res.json({
       message: "Turtle deleted successfully",
@@ -4140,6 +4167,17 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
     }
 
     await client.query("COMMIT");
+
+    // Extends the "deleted" audit entry already written for emergence
+    // deletes (QA-042) to nests and turtles too - without it, the trail went
+    // silent after "created" and there was no record of who removed either.
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: deleted.rows[0].nest_code ? `Nest ${deleted.rows[0].nest_code}` : null,
+    });
 
     res.json({
       message: "Nest deleted successfully",

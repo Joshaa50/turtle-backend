@@ -90,10 +90,23 @@ describe('defaults match current API behaviour', () => {
     expect(res.status).toBeLessThan(400);
   });
 
-  it('a turtle still needs every measurement, as it always has', async () => {
+  it('a turtle still needs the core carapace measurements, as it always has', async () => {
     const res = await asVolunteer(request(app).post('/turtles/create')).send(validTurtle);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/measurement/i);
+  });
+
+  // QA-063: tail_extension/vent_to_tail_tip/total_tail_length used to be
+  // bundled into the same all-or-nothing "measurements" group as the core
+  // carapace numbers, so a turtle that bolted or had tail damage before
+  // every figure could be taken couldn't be saved at all. They're their own
+  // group now, "recommended" by default - carapace numbers still block,
+  // tail ones no longer do.
+  it('a turtle saves without tail measurements once the core carapace ones are given', async () => {
+    const res = await asVolunteer(request(app).post('/turtles/create')).send({
+      ...validTurtle, scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
+    });
+    expect(res.status).toBe(200);
   });
 
   it('a survey still saves without corner GPS', async () => {
@@ -164,7 +177,7 @@ describe('the allowlist', () => {
       nest: { gps: 'recommended', distance_to_sea_s: 'recommended', track_sketch: 'recommended', triangulation: 'recommended', notes: 'recommended', nest_code: 'recommended' },
       emergence: { gps: 'recommended', distance_to_sea_s: 'recommended', track_sketch: 'recommended' },
       nest_event: { reburied_measurements: 'recommended', observer: 'recommended', notes: 'recommended', event_type: 'recommended' },
-      turtle: { front_left_tag: 'recommended', front_right_tag: 'recommended', rear_left_tag: 'recommended', rear_right_tag: 'recommended', measurements: 'required' },
+      turtle: { front_left_tag: 'recommended', front_right_tag: 'recommended', rear_left_tag: 'recommended', rear_right_tag: 'recommended', measurements: 'required', tail_measurements: 'recommended' },
       morning_survey: { gps: 'recommended', protected_nest_count: 'recommended', notes: 'recommended' },
     });
     expect(res.status).toBe(200);
@@ -183,7 +196,7 @@ describe('the allowlist', () => {
       nest: { gps: 'required', distance_to_sea_s: 'required', track_sketch: 'recommended', triangulation: 'recommended', notes: 'recommended' },
       emergence: { gps: 'recommended', distance_to_sea_s: 'recommended', track_sketch: 'recommended' },
       nest_event: { reburied_measurements: 'recommended', observer: 'recommended', notes: 'recommended' },
-      turtle: { front_left_tag: 'recommended', front_right_tag: 'recommended', rear_left_tag: 'recommended', rear_right_tag: 'recommended', measurements: 'required' },
+      turtle: { front_left_tag: 'recommended', front_right_tag: 'recommended', rear_left_tag: 'recommended', rear_right_tag: 'recommended', measurements: 'required', tail_measurements: 'recommended' },
       morning_survey: { gps: 'recommended', protected_nest_count: 'recommended', notes: 'recommended' },
       ...body,
     };
