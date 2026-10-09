@@ -2384,12 +2384,16 @@ const applyAutoApprove = async () => {
   try {
     const days = (await getReviewRules()).auto_approve_days;
     if (!days) return;
-    await db.query(
+    const result = await db.query(
       `UPDATE record_reviews
        SET status = 'approved', reviewed_by = NULL, reviewed_at = NOW(), review_note = $2
-       WHERE status = 'pending' AND submitted_at < NOW() - ($1::int * INTERVAL '1 day');`,
+       WHERE status = 'pending' AND submitted_at < NOW() - ($1::int * INTERVAL '1 day')
+       RETURNING id, record_type, record_id;`,
       [days, `Auto-approved after ${days} days without review.`]
     );
+    for (const row of result.rows) {
+      await applyApprovalSideEffects(row.record_type, row.record_id, { user: null });
+    }
   } catch (err) {
     console.error("Auto-approve failed:", err.message);
   }
@@ -2446,6 +2450,47 @@ const queueReviewSafely = async (recordType, recordId, req) => {
   } catch (err) {
     console.error(`Could not queue ${recordType} ${recordId} for review:`, err.message);
     return null;
+  }
+};
+
+// A nest-event that reports hatchlings leaving the nest is how a nest's own
+// status moves from incubating to hatching - but only once a Field Leader has
+// confirmed it, the same trust boundary record_reviews already enforces for
+// everything else a Volunteer submits. Approving a volunteer-submitted
+// nest_event of an emergence/hatching type is therefore the trigger point,
+// not the event's own creation.
+const applyApprovalSideEffects = async (recordType, recordId, req) => {
+  if (recordType !== "nest_event") return;
+  try {
+    const ev = await db.query(
+      `SELECT event_type, nest_id FROM turtle_nest_events WHERE id = $1;`,
+      [recordId]
+    );
+    const row = ev.rows[0];
+    if (!row || !isEmergenceType(row.event_type) || row.nest_id == null) return;
+
+    const before = await db.query(
+      `SELECT nest_code, status FROM turtle_nests WHERE id = $1 AND status = 'incubating';`,
+      [row.nest_id]
+    );
+    if (before.rows.length === 0) return; // already hatching/hatched, or gone
+
+    const updated = await db.query(
+      `UPDATE turtle_nests SET status = 'hatching', updated_at = NOW()
+       WHERE id = $1 RETURNING nest_code;`,
+      [row.nest_id]
+    );
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: row.nest_id,
+      action: "updated",
+      req,
+      summary: `Status incubating → hatching (hatchling track approved) (${updated.rows[0]?.nest_code ?? before.rows[0].nest_code})`,
+    });
+  } catch (err) {
+    // Same posture as queueReviewSafely/recordAudit: never turn a successful
+    // approval into an error for the reviewer because a side effect failed.
+    console.error(`Could not apply nest status transition for nest_event ${recordId}:`, err.message);
   }
 };
 
@@ -5646,7 +5691,7 @@ const decideReview = (decision) => async (req, res) => {
       `UPDATE record_reviews
        SET status = $1, reviewed_by = $2, reviewed_at = NOW(), review_note = $3
        WHERE id = $4 AND status = 'pending'
-       RETURNING id;`,
+       RETURNING id, record_type, record_id;`,
       [decision, req.user.id, note, id]
     );
 
@@ -5661,6 +5706,11 @@ const decideReview = (decision) => async (req, res) => {
         error: `Already ${existing.rows[0].status} by someone else.`,
         status: existing.rows[0].status,
       });
+    }
+
+    if (decision === "approved") {
+      const { record_type, record_id } = result.rows[0];
+      await applyApprovalSideEffects(record_type, record_id, req);
     }
 
     const full = await db.query(`${REVIEW_SELECT} WHERE r.id = $1;`, [id]);
@@ -5714,11 +5764,15 @@ app.post("/reviews/bulk-approve", requireRole(...REVIEWERS), async (req, res) =>
       `UPDATE record_reviews
        SET status = 'approved', reviewed_by = $1, reviewed_at = NOW()
        WHERE id = ANY($2::int[]) AND status = 'pending'
-       RETURNING id;`,
+       RETURNING id, record_type, record_id;`,
       [req.user.id, ids]
     );
     const approvedIds = result.rows.map((r) => r.id);
     const skippedIds = ids.filter((id) => !approvedIds.includes(id));
+
+    for (const row of result.rows) {
+      await applyApprovalSideEffects(row.record_type, row.record_id, req);
+    }
 
     const full = await db.query(`${REVIEW_SELECT} WHERE r.id = ANY($1::int[]);`, [approvedIds]);
     const reviews = await describeReviewedRecords(full.rows);
