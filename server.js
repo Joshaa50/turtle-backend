@@ -5862,8 +5862,18 @@ app.get("/alerts", async (req, res) => {
          ORDER BY r.reviewed_at DESC NULLS LAST LIMIT 50;`,
         [req.user.id]
       );
-      for (const r of await describeReviewedRecords(decided.rows, { detail: false })) {
-        if (r.record_missing || !["approved", "rejected"].includes(r.status)) continue;
+      const described = (await describeReviewedRecords(decided.rows, { detail: false }))
+        .filter((r) => !r.record_missing && ["approved", "rejected"].includes(r.status));
+
+      // A multi-beach morning survey walk is one record_reviews row per beach
+      // (QA-034), so bulk-approving it leaves one review_approved alert per
+      // beach too. They share reviewed_by/reviewed_at (bulk-approve updates
+      // them all in one statement) and the same survey, so group them back
+      // into the single walk a volunteer actually submitted (QA-059).
+      const morningApproved = described.filter((r) => r.record_type === "morning_survey" && r.status === "approved");
+      const rest = described.filter((r) => !(r.record_type === "morning_survey" && r.status === "approved"));
+
+      for (const r of rest) {
         const rejected = r.status === "rejected";
         alerts.push({
           id: `review-${r.id}`, review_id: r.id,
@@ -5874,6 +5884,46 @@ app.get("/alerts", async (req, res) => {
             : `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
           at: r.reviewed_at, can_acknowledge: true,
         });
+      }
+
+      if (morningApproved.length) {
+        const meta = await db.query(
+          `SELECT ms.id AS survey_id, ms.survey_date, b.survey_area, b.name AS beach_name
+           FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
+           WHERE ms.id = ANY($1::int[]);`,
+          [morningApproved.map((r) => r.record_id)]
+        );
+        const metaBySurvey = new Map(meta.rows.map((row) => [row.survey_id, row]));
+
+        const groups = new Map();
+        for (const r of morningApproved) {
+          const m = metaBySurvey.get(r.record_id) || {};
+          const key = `${r.reviewed_at}|${m.survey_date}|${m.survey_area}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push({ r, m });
+        }
+
+        for (const group of groups.values()) {
+          if (group.length === 1) {
+            const { r } = group[0];
+            alerts.push({
+              id: `review-${r.id}`, review_id: r.id,
+              kind: "review_approved", title: "Approved",
+              message: `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
+              at: r.reviewed_at, can_acknowledge: true,
+            });
+          } else {
+            const ids = group.map(({ r }) => r.id).sort((a, b) => a - b);
+            const area = group[0].m.survey_area
+              || [...new Set(group.map(({ m }) => m.beach_name).filter(Boolean))].join(", ");
+            alerts.push({
+              id: `review-group-${ids.join(",")}`, review_ids: ids,
+              kind: "review_approved", title: "Approved",
+              message: `Your ${area} walk was approved.`,
+              at: group[0].r.reviewed_at, can_acknowledge: true,
+            });
+          }
+        }
       }
     }
 
@@ -5932,17 +5982,36 @@ app.get("/alerts", async (req, res) => {
 
 app.post("/alerts/:id/acknowledge", async (req, res) => {
   try {
-    const reviewId = Number.parseInt(String(req.params.id).replace(/^review-/, ""), 10);
-    if (!Number.isInteger(reviewId)) return res.status(400).json({ error: "Unknown alert." });
-    // The submitter, or a reviewer on their behalf (shared acknowledgement).
-    const result = await db.query(
-      `UPDATE record_reviews
-       SET acknowledged_at = NOW(), acknowledged_by = $2
-       WHERE id = $1 AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
-         AND (submitted_by = $2 OR $3::boolean)
-       RETURNING id;`,
-      [reviewId, req.user.id, REVIEWERS.includes(req.user.role)]
-    );
+    const rawId = String(req.params.id);
+    // A grouped morning-survey alert (QA-059) covers several record_reviews
+    // rows at once; clear them all in the one statement rather than making
+    // the caller loop. A partial match (someone already cleared one beach's
+    // row) still counts as success, same as the single-id case below.
+    const isGroup = rawId.startsWith("review-group-");
+    let sql, idParam;
+    if (isGroup) {
+      const ids = rawId.slice("review-group-".length).split(",").map((s) => Number.parseInt(s, 10));
+      if (ids.length === 0 || ids.some((n) => !Number.isInteger(n))) {
+        return res.status(400).json({ error: "Unknown alert." });
+      }
+      idParam = ids;
+      sql = `UPDATE record_reviews
+             SET acknowledged_at = NOW(), acknowledged_by = $2
+             WHERE id = ANY($1::int[]) AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+               AND (submitted_by = $2 OR $3::boolean)
+             RETURNING id;`;
+    } else {
+      const reviewId = Number.parseInt(rawId.replace(/^review-/, ""), 10);
+      if (!Number.isInteger(reviewId)) return res.status(400).json({ error: "Unknown alert." });
+      idParam = reviewId;
+      // The submitter, or a reviewer on their behalf (shared acknowledgement).
+      sql = `UPDATE record_reviews
+             SET acknowledged_at = NOW(), acknowledged_by = $2
+             WHERE id = $1 AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+               AND (submitted_by = $2 OR $3::boolean)
+             RETURNING id;`;
+    }
+    const result = await db.query(sql, [idParam, req.user.id, REVIEWERS.includes(req.user.role)]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "That alert is already cleared, or is not yours to clear." });
     }

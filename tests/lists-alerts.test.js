@@ -26,6 +26,7 @@ let stored;
 let query;
 let reviewRows; // what the review queries return
 let existingTurtle;
+let surveyMeta; // what the morning_surveys/beaches join returns, for grouping review_approved alerts
 
 const review = (over = {}) => ({
   id: 5, record_type: 'nest', record_id: 9, status: 'pending', submitted_by: 51,
@@ -38,6 +39,7 @@ beforeEach(() => {
   stored = {};
   reviewRows = [];
   existingTurtle = { species: 'Legacy free text', health_condition: 'Deceased' };
+  surveyMeta = [];
   query = vi.spyOn(db, 'query').mockImplementation(async (sql, params) => {
     const text = String(sql);
     if (text.includes('FROM app_settings')) {
@@ -47,9 +49,13 @@ beforeEach(() => {
       stored[params[0]] = JSON.parse(params[1]);
       return { rows: [] };
     }
+    if (text.includes('FROM morning_surveys ms')) return { rows: surveyMeta };
     if (text.includes('FROM record_reviews r')) return { rows: reviewRows };
     if (text.includes('SELECT id, nest_code AS label') ) return { rows: [{ id: 9, label: 'LG2-9' }] };
-    if (text.includes('AS label FROM')) return { rows: [{ id: 9, label: 'LG2-9' }] };
+    if (text.includes('AS label FROM')) {
+      const ids = Array.isArray(params?.[0]) ? params[0] : [9];
+      return { rows: ids.map((id) => ({ id, label: id === 9 ? 'LG2-9' : `label-${id}` })) };
+    }
     if (text.includes('SELECT species, health_condition FROM turtles')) return { rows: [existingTurtle] };
     // Not under test here - no nest is overdue in these fixtures.
     if (text.includes('FROM turtle_nests') && text.includes('date_found <=')) return { rows: [] };
@@ -232,6 +238,48 @@ describe('alerts', () => {
   it('needs a token', async () => {
     expect((await request(app).get('/alerts')).status).toBe(401);
     expect((await request(app).post('/alerts/5/acknowledge')).status).toBe(401);
+  });
+
+  it('groups a bulk-approved multi-beach morning survey walk into one alert (QA-059)', async () => {
+    reviewRows = [
+      review({ id: 10, record_type: 'morning_survey', record_id: 101, status: 'approved', reviewed_by: 7, reviewed_at: '2026-06-02T05:00:00Z' }),
+      review({ id: 11, record_type: 'morning_survey', record_id: 102, status: 'approved', reviewed_by: 7, reviewed_at: '2026-06-02T05:00:00Z' }),
+    ];
+    surveyMeta = [
+      { survey_id: 101, survey_date: '2026-06-02', survey_area: 'Lepeda', beach_name: 'Lepeda North' },
+      { survey_id: 102, survey_date: '2026-06-02', survey_area: 'Lepeda', beach_name: 'Lepeda South' },
+    ];
+    const res = await asVolunteer(request(app).get('/alerts'));
+    const approved = res.body.alerts.filter((a) => a.kind === 'review_approved');
+    expect(approved).toHaveLength(1);
+    expect(approved[0].id).toBe('review-group-10,11');
+    expect(approved[0].message).toContain('Your Lepeda walk was approved');
+    expect(approved[0].can_acknowledge).toBe(true);
+  });
+
+  it('does not merge morning survey approvals from different walks (QA-059)', async () => {
+    reviewRows = [
+      review({ id: 10, record_type: 'morning_survey', record_id: 101, status: 'approved', reviewed_by: 7, reviewed_at: '2026-06-02T05:00:00Z' }),
+      review({ id: 12, record_type: 'morning_survey', record_id: 103, status: 'approved', reviewed_by: 7, reviewed_at: '2026-06-02T05:00:00Z' }),
+    ];
+    surveyMeta = [
+      { survey_id: 101, survey_date: '2026-06-02', survey_area: 'Lepeda', beach_name: 'Lepeda North' },
+      { survey_id: 103, survey_date: '2026-06-02', survey_area: 'Mounda', beach_name: 'Mounda' },
+    ];
+    const res = await asVolunteer(request(app).get('/alerts'));
+    const approved = res.body.alerts.filter((a) => a.kind === 'review_approved');
+    expect(approved).toHaveLength(2);
+    expect(approved.map((a) => a.id).sort()).toEqual(['review-10', 'review-12']);
+  });
+
+  it('acknowledges a grouped morning survey alert in one call, succeeding even if one row is already cleared', async () => {
+    query.mockImplementation(async (sql, params) =>
+      String(sql).includes('SET acknowledged_at') ? { rows: [{ id: 6 }] } : { rows: [] });
+    const res = await asVolunteer(request(app).post('/alerts/review-group-5,6/acknowledge'));
+    expect(res.status).toBe(200);
+    const call = query.mock.calls.find(([sql]) => String(sql).includes('SET acknowledged_at'));
+    expect(call[0]).toContain('ANY($1::int[])');
+    expect(call[1]).toEqual([[5, 6], '51', false]);
   });
 
   it('saves alert settings and validates them', async () => {
