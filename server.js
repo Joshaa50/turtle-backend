@@ -454,7 +454,28 @@ const isOwnRecord = async (recordType, recordId, userId) => {
 const REVIEWABLE = {
   nest: { table: "turtle_nests", label: "Nest", describe: "nest_code" },
   turtle: { table: "turtles", label: "Turtle", describe: "name" },
-  nest_event: { table: "turtle_nest_events", label: "Nest event", describe: "event_type" },
+  // event_type is a raw code (e.g. "EMERGENCE"); describeKind/describe turn it
+  // and the event's own columns into the same phrasing describeNestEvent uses
+  // for audit summaries, so a reviewer sees "Hatchling tracks · VR-1R (23 to
+  // sea, 2 lost)" instead of "Nest event · EMERGENCE".
+  nest_event: {
+    table: "turtle_nest_events",
+    label: "Nest event",
+    describeKind: `CASE
+      WHEN UPPER(event_type) IN ('EMERGENCE', 'HATCHING') THEN 'Hatchling tracks'
+      WHEN event_type = 'PARTIAL_INVENTORY' THEN 'Partial inventory'
+      WHEN UPPER(event_type) LIKE '%INVENTORY%' THEN 'Inventory'
+      WHEN event_type = 'TOP_EGG' THEN 'Top egg check'
+      ELSE 'Nest event'
+    END`,
+    describe: `CASE
+      WHEN UPPER(event_type) IN ('EMERGENCE', 'HATCHING')
+        THEN COALESCE(nest_code, '?') || ' (' || COALESCE(tracks_to_sea, 0) || ' to sea, ' || COALESCE(tracks_lost, 0) || ' lost)'
+      WHEN event_type = 'PARTIAL_INVENTORY' OR UPPER(event_type) LIKE '%INVENTORY%' OR event_type = 'TOP_EGG'
+        THEN COALESCE(nest_code, '?')
+      ELSE COALESCE(nest_code, UPPER(event_type))
+    END`,
+  },
   emergence: { table: "turtle_emergences", label: "Emergence", describe: "beach" },
   // morning_surveys stores beach_id, not a beach name, so its label is looked up.
   morning_survey: { table: "morning_surveys", label: "Morning survey", describe: "(SELECT name FROM beaches WHERE beaches.id = beach_id)" },
@@ -5605,15 +5626,21 @@ const describeReviewedRecords = async (rows, { detail = true } = {}) => {
   }
 
   const labels = new Map();
+  const kinds = new Map();
   for (const [type, ids] of byType) {
-    const { table, describe } = REVIEWABLE[type];
-    // Table and expression come from REVIEWABLE, never from the request, so they
-    // are safe to interpolate; the ids stay parameterised.
+    const { table, describe, describeKind } = REVIEWABLE[type];
+    // Table and expressions come from REVIEWABLE, never from the request, so
+    // they are safe to interpolate; the ids stay parameterised. describeKind
+    // is only set for record types whose label depends on a subtype (today
+    // just nest_event); every other type's query is unchanged.
     const found = await db.query(
-      `SELECT id, ${describe} AS label FROM ${table} WHERE id = ANY($1::int[]);`,
+      `SELECT id, ${describe} AS label${describeKind ? `, ${describeKind} AS kind` : ""} FROM ${table} WHERE id = ANY($1::int[]);`,
       [ids]
     );
-    for (const row of found.rows) labels.set(`${type}:${row.id}`, row.label);
+    for (const row of found.rows) {
+      labels.set(`${type}:${row.id}`, row.label);
+      if (describeKind) kinds.set(`${type}:${row.id}`, row.kind);
+    }
   }
 
   const details = detail ? await loadReviewDetails(byType) : new Map();
@@ -5622,7 +5649,7 @@ const describeReviewedRecords = async (rows, { detail = true } = {}) => {
     ...r,
     record_label: labels.get(`${r.record_type}:${r.record_id}`) ?? null,
     record_detail: details.get(`${r.record_type}:${r.record_id}`) ?? null,
-    record_kind: REVIEWABLE[r.record_type]?.label ?? r.record_type,
+    record_kind: kinds.get(`${r.record_type}:${r.record_id}`) ?? REVIEWABLE[r.record_type]?.label ?? r.record_type,
     // A record that no longer exists was deleted after being submitted. Say so
     // rather than showing a reviewer a blank row they cannot act on.
     record_missing: !labels.has(`${r.record_type}:${r.record_id}`),

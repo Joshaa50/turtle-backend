@@ -197,6 +197,29 @@ describe('alerts', () => {
     expect(call[1]).toEqual([24]);
   });
 
+  it('names a hatchling-track nest_event by kind and nest code, not the raw event_type (QA-072)', async () => {
+    reviewRows = [review({
+      record_type: 'nest_event', record_id: 11, status: 'approved',
+      reviewed_by: 7, reviewed_at: '2026-06-02T05:00:00Z',
+    })];
+    query.mockImplementation(async (sql) => {
+      const text = String(sql);
+      if (text.includes('FROM app_settings')) return { rows: [] };
+      if (text.includes('FROM record_reviews r')) return { rows: reviewRows };
+      if (text.includes('FROM turtle_nest_events') && text.includes('AS kind')) {
+        return { rows: [{ id: 11, label: 'VR-1R (23 to sea, 2 lost)', kind: 'Hatchling tracks' }] };
+      }
+      return { rows: [] };
+    });
+
+    const res = await asVolunteer(request(app).get('/alerts'));
+
+    const alert = res.body.alerts.find((a) => a.kind === 'review_approved');
+    expect(alert.message).toContain('Hatchling tracks');
+    expect(alert.message).toContain('VR-1R');
+    expect(alert.message).not.toContain('Nest event EMERGENCE');
+  });
+
   it('skips an alert whose record was deleted', async () => {
     reviewRows = [review({ record_id: 404 })];
     query.mockImplementation(async (sql, params) => {
