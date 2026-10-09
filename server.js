@@ -2778,6 +2778,12 @@ app.get("/turtles/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
+    // QA-071: a non-numeric id (e.g. "abc") reached the query as-is, which
+    // Postgres rejects with an invalid-integer-input error - caught by the
+    // generic handler below as an opaque 500. Same guard already used by
+    // GET /users/:id (QA-060).
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
     const sql = `SELECT * FROM turtles WHERE id = $1;`;
     const result = await db.query(sql, [id]);
 
