@@ -2525,10 +2525,21 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
   }
 });
 
-// Update turtle tags + measurements + health condition endpoint
+// Update turtle tags + measurements + health condition endpoint.
+//
+// Records/TurtleDetails hide the Edit button for a Field Volunteer, so the
+// only legitimate path through here for one is "My Submissions > Edit & send
+// back for review" on their own record - same ownership check record_audit
+// already provides for that flow. requireRole still lists VOLUNTEER (the
+// resubmit flow needs it), so the ownership guard below is what keeps a
+// Volunteer from editing someone else's turtle via the API directly.
 app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (req.user.role === VOLUNTEER && !(await isOwnRecord("turtle", id, req.user.id))) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
 
     const {
       health_condition,
@@ -4101,6 +4112,14 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: "Emergence not found." });
     }
+
+    await recordAudit(db, {
+      recordType: "emergence",
+      recordId: result.rows[0]?.id,
+      action: "updated",
+      req,
+      summary: result.rows[0]?.beach ? `Emergence at ${result.rows[0].beach}` : null,
+    });
 
     res.json({ message: "Emergence updated successfully", emergence: result.rows[0] });
   } catch (err) {
