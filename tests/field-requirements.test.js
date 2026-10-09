@@ -48,6 +48,11 @@ beforeEach(() => {
       return { rows: [] };
     }
     if (text.includes('SELECT n.id, n.total_num_eggs')) return { rows: [{ id: 1, total_num_eggs: 100, emerged_so_far: 0 }] };
+    if (text.includes('UPDATE turtles')) {
+      // Echoes the bound tail measurement params back as the RETURNING row,
+      // the same way the real UPDATE ... RETURNING * would.
+      return { rows: [{ id: 1, tail_extension: params[15], vent_to_tail_tip: params[16], total_tail_length: params[17] }] };
+    }
     return { rows: [{ id: 1, nest_code: 'LG2-9', beach: 'Loggos 2' }] };
   });
 });
@@ -107,6 +112,65 @@ describe('defaults match current API behaviour', () => {
       ...validTurtle, scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
     });
     expect(res.status).toBe(200);
+  });
+
+  it("insertTurtle's bind params never contain undefined for the tail columns when the body omits them entirely", async () => {
+    const res = await asVolunteer(request(app).post('/turtles/create')).send({
+      ...validTurtle, scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
+      // tail_extension/vent_to_tail_tip/total_tail_length keys omitted entirely, not just empty.
+    });
+    expect(res.status).toBe(200);
+
+    const insertCall = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO turtles'));
+    expect(insertCall).toBeTruthy();
+    const [, insertParams] = insertCall;
+    // tail_extension, vent_to_tail_tip, total_tail_length are the 19th-21st bound params.
+    const tailParams = insertParams.slice(18, 21);
+    expect(tailParams).toEqual([null, null, null]);
+    expect(tailParams.every((v) => v !== undefined)).toBe(true);
+  });
+
+  // A volunteer can only update a turtle they themselves recorded
+  // (isOwnRecord) - that ownership check is unrelated to QA-063, so these use
+  // a Field Leader, who is exempt from it, to isolate the field-requirements
+  // behaviour under test.
+  it('PUT /turtles/:id/update saves with each tail measurement individually null', async () => {
+    for (const field of ['tail_extension', 'vent_to_tail_tip', 'total_tail_length']) {
+      const res = await asLeader(request(app).put('/turtles/1/update')).send({
+        ...validTurtle, scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
+        tail_extension: 20, vent_to_tail_tip: 15, total_tail_length: 35,
+        [field]: null,
+      });
+      expect(res.status).toBeLessThan(400);
+      expect(res.body.turtle[field]).toBeNull();
+    }
+  });
+
+  it('PUT /turtles/:id/update saves with all three tail measurements null together', async () => {
+    const res = await asLeader(request(app).put('/turtles/1/update')).send({
+      ...validTurtle, scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
+      tail_extension: null, vent_to_tail_tip: null, total_tail_length: null,
+    });
+    expect(res.status).toBeLessThan(400);
+    expect(res.body.turtle.tail_extension).toBeNull();
+    expect(res.body.turtle.vent_to_tail_tip).toBeNull();
+    expect(res.body.turtle.total_tail_length).toBeNull();
+  });
+
+  it('PUT /turtles/:id/update still rejects a body missing core carapace measurements', async () => {
+    const res = await asLeader(request(app).put('/turtles/1/update')).send({
+      ...validTurtle,
+      tail_extension: null, vent_to_tail_tip: null, total_tail_length: null,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT /turtles/:id/update still rejects a body missing health_condition', async () => {
+    const res = await asLeader(request(app).put('/turtles/1/update')).send({
+      species: 'Caretta caretta',
+      scl_max: 85, scl_min: 83, scw: 60, ccl_max: 88, ccl_min: 86, ccw: 62,
+    });
+    expect(res.status).toBe(400);
   });
 
   it('a survey still saves without corner GPS', async () => {

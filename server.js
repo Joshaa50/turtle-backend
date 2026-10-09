@@ -1742,6 +1742,28 @@ if (require.main === module) {
   })();
 }
 
+// QA-063: the app layer already treats the three tail measurements as
+// "recommended" (FORM_FIELD_SCHEMA.turtle.tail_measurements, insertTurtle,
+// insertTurtleSurveyEvent), but the live table was never altered to match -
+// a NOT NULL left over from before that change still rejected a save with
+// any of the three blank. Same boot-time, idempotent pattern as
+// turtles.is_archived above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtles ALTER COLUMN tail_extension DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtles ALTER COLUMN vent_to_tail_tip DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtles ALTER COLUMN total_tail_length DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN tail_extension DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN vent_to_tail_tip DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN total_tail_length DROP NOT NULL;`);
+      console.log("Tail measurement columns on turtles and turtle_survey_events are nullable.");
+    } catch (err) {
+      console.error("Could not ensure tail measurement columns are nullable:", err.message);
+    }
+  })();
+}
+
 //--------------------------------------------------------------
 // Volunteer submissions awaiting a Field Leader's confirmation.
 //
@@ -2832,7 +2854,6 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     "event_type", "location", "turtle_id",
     "scl_max", "scl_min", "scw",
     "ccl_max", "ccl_min", "ccw",
-    "tail_extension", "vent_to_tail_tip", "total_tail_length",
     "health_condition", "observer"
   ];
   for (const field of requiredFields) {
@@ -2878,7 +2899,7 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     rear_right_tag || null, rear_right_address || null,
     scl_max, scl_min, scw,
     ccl_max, ccl_min, ccw,
-    tail_extension, vent_to_tail_tip, total_tail_length,
+    tail_extension ?? null, vent_to_tail_tip ?? null, total_tail_length ?? null,
     health_condition, observer, notes || null,
     time_first_seen || null, time_start_egg_laying || null, time_covering || null,
     time_end_camouflage || null, time_reach_sea || null,
