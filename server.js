@@ -3856,6 +3856,10 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
+    if (req.user.role === VOLUNTEER && !(await isOwnRecord("nest_event", id, req.user.id))) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
+
     const {
       event_type,
       nest_id,
