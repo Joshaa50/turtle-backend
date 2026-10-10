@@ -5626,6 +5626,7 @@ const REVIEW_DETAIL_SQL = {
   morning_survey: `SELECT ms.id,
                           (to_jsonb(ms) || jsonb_build_object(
                             'beach', b.name,
+                            'survey_area', b.survey_area,
                             'linked_nests', COALESCE((
                               SELECT jsonb_agg(
                                 ((to_jsonb(tn) - 'tri_tl_img' - 'tri_tr_img') || jsonb_build_object(
