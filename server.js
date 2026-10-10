@@ -2484,29 +2484,53 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
   if (recordType !== "nest_event") return;
   try {
     const ev = await db.query(
-      `SELECT event_type, nest_id FROM turtle_nest_events WHERE id = $1;`,
+      `SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events WHERE id = $1;`,
       [recordId]
     );
     const row = ev.rows[0];
-    if (!row || !isEmergenceType(row.event_type) || row.nest_id == null) return;
+    if (!row || row.nest_id == null) return;
+
+    const type = row.event_type;
+    let targetStatus = null;
+    let fromStatuses = null;
+
+    if (isEmergenceType(type)) {
+      targetStatus = "hatching";
+      fromStatuses = ["incubating"];
+    } else if (isExcavationType(type)) {
+      // TOP_EGG does not match isExcavationType, so a top-egg check never
+      // moves status - matches the old frontend's isTopEggCheck guard.
+      const reburied = Number(row.eggs_reburied) || 0;
+      const total = Number(row.total_eggs) || 0;
+      if (reburied === 0) {
+        targetStatus = "hatched";
+        fromStatuses = ["incubating", "hatching"];
+      } else if (total > 0 && reburied < total) {
+        targetStatus = "hatching";
+        fromStatuses = ["incubating"];
+      } else {
+        return;
+      }
+    } else {
+      return;
+    }
 
     const before = await db.query(
-      `SELECT nest_code, status FROM turtle_nests WHERE id = $1 AND status = 'incubating';`,
-      [row.nest_id]
+      `SELECT nest_code, status FROM turtle_nests WHERE id = $1 AND status = ANY($2::text[]);`,
+      [row.nest_id, fromStatuses]
     );
-    if (before.rows.length === 0) return; // already hatching/hatched, or gone
+    if (before.rows.length === 0) return; // already past this status, or gone
 
     const updated = await db.query(
-      `UPDATE turtle_nests SET status = 'hatching', updated_at = NOW()
-       WHERE id = $1 RETURNING nest_code;`,
-      [row.nest_id]
+      `UPDATE turtle_nests SET status = $2, updated_at = NOW() WHERE id = $1 RETURNING nest_code;`,
+      [row.nest_id, targetStatus]
     );
     await recordAudit(db, {
       recordType: "nest",
       recordId: row.nest_id,
       action: "updated",
       req,
-      summary: `Status incubating → hatching (hatchling track approved) (${updated.rows[0]?.nest_code ?? before.rows[0].nest_code})`,
+      summary: `Status ${before.rows[0].status} → ${targetStatus} (${isExcavationType(type) ? "inventory" : "hatchling track"} approved) (${updated.rows[0]?.nest_code ?? before.rows[0].nest_code})`,
     });
   } catch (err) {
     // Same posture as queueReviewSafely/recordAudit: never turn a successful

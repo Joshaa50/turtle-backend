@@ -3,11 +3,19 @@
 // Field Leader approves the review, never when the event is merely created
 // (an unreviewed submission must not change what a nest shows).
 //
+// QA-075: the same holds for excavation/inventory nest_events (FULL_INVENTORY/
+// PARTIAL_INVENTORY) - the target status is derived from the event's own
+// eggs_reburied/total_eggs rather than a direct frontend PUT to the nest
+// (which 403s for a Volunteer even though the event itself saved fine).
+//
 // These cases pin down:
 //   - approving an emergence/hatching nest_event flips its nest to hatching,
 //     and only when the nest is currently incubating (idempotent otherwise)
-//   - approving a non-emergence nest_event (e.g. an inventory check) never
-//     touches turtle_nests
+//   - approving a FULL_INVENTORY (eggs_reburied: 0) moves incubating/hatching
+//     nests to hatched
+//   - approving a PARTIAL_INVENTORY (0 < eggs_reburied < total_eggs) moves
+//     incubating to hatching
+//   - approving a TOP_EGG nest_event never touches turtle_nests
 //   - the same holds through /reviews/bulk-approve for a mixed batch
 //   - a rejection never triggers the side effect, regardless of record type
 //   - the transition is recorded in record_audit
@@ -34,6 +42,8 @@ const mockApprovalFlow = ({
   nestId = 90,
   nestStatus = 'incubating',
   nestCode = 'LG2-9',
+  eggsReburied = 0,
+  totalEggs = 0,
 } = {}) => {
   const calls = [];
   const impl = (sql, params) => {
@@ -43,15 +53,18 @@ const mockApprovalFlow = ({
     if (text.includes('UPDATE record_reviews') && params?.[0] === 'approved') {
       return Promise.resolve({ rows: [{ id: 5, record_type: 'nest_event', record_id: 11 }] });
     }
-    if (text.includes('SELECT event_type, nest_id FROM turtle_nest_events')) {
-      return Promise.resolve({ rows: [{ event_type: eventType, nest_id: nestId }] });
+    if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+      return Promise.resolve({
+        rows: [{ event_type: eventType, nest_id: nestId, eggs_reburied: eggsReburied, total_eggs: totalEggs }],
+      });
     }
-    if (text.includes("SELECT nest_code, status FROM turtle_nests") && text.includes("status = 'incubating'")) {
-      return nestStatus === 'incubating'
-        ? Promise.resolve({ rows: [{ nest_code: nestCode, status: 'incubating' }] })
+    if (text.includes('SELECT nest_code, status FROM turtle_nests') && text.includes('status = ANY')) {
+      const fromStatuses = params?.[1] || [];
+      return fromStatuses.includes(nestStatus)
+        ? Promise.resolve({ rows: [{ nest_code: nestCode, status: nestStatus }] })
         : Promise.resolve({ rows: [] });
     }
-    if (text.includes("UPDATE turtle_nests SET status = 'hatching'")) {
+    if (text.includes('UPDATE turtle_nests SET status = $2')) {
       return Promise.resolve({ rows: [{ nest_code: nestCode }] });
     }
     if (text.includes('INSERT INTO record_audit')) {
@@ -64,8 +77,8 @@ const mockApprovalFlow = ({
   return { query, calls };
 };
 
-const wroteNestHatching = (calls) =>
-  calls.some((c) => c.text.includes("UPDATE turtle_nests SET status = 'hatching'"));
+const wroteNestStatus = (calls, status) =>
+  calls.some((c) => c.text.includes('UPDATE turtle_nests SET status = $2') && c.params?.[1] === status);
 
 const wroteNestAudit = (calls) =>
   calls.some(
@@ -75,14 +88,14 @@ const wroteNestAudit = (calls) =>
       c.params?.[2] === 'updated'
   );
 
-describe('approving a nest_event side effect (QA-070)', () => {
+describe('approving a nest_event side effect (QA-070 / QA-075)', () => {
   it('moves an incubating nest to hatching when an EMERGENCE review is approved', async () => {
     const { calls } = mockApprovalFlow({ eventType: 'EMERGENCE', nestStatus: 'incubating' });
 
     const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
 
     expect(res.status).toBe(200);
-    expect(wroteNestHatching(calls)).toBe(true);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(true);
     expect(wroteNestAudit(calls)).toBe(true);
   });
 
@@ -92,26 +105,85 @@ describe('approving a nest_event side effect (QA-070)', () => {
     const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
 
     expect(res.status).toBe(200);
-    expect(wroteNestHatching(calls)).toBe(true);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(true);
   });
 
-  it('does not touch turtle_nests for a non-emergence nest_event (e.g. INVENTORY)', async () => {
-    const { calls } = mockApprovalFlow({ eventType: 'INVENTORY', nestStatus: 'incubating' });
+  it('moves an incubating nest to hatched when a FULL_INVENTORY (eggs_reburied: 0) review is approved', async () => {
+    const { calls } = mockApprovalFlow({
+      eventType: 'FULL_INVENTORY',
+      nestStatus: 'incubating',
+      eggsReburied: 0,
+      totalEggs: 100,
+    });
 
     const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
 
     expect(res.status).toBe(200);
-    expect(wroteNestHatching(calls)).toBe(false);
+    expect(wroteNestStatus(calls, 'hatched')).toBe(true);
+    expect(wroteNestAudit(calls)).toBe(true);
+  });
+
+  it('moves a hatching nest to hatched when a FULL_INVENTORY (eggs_reburied: 0) review is approved', async () => {
+    const { calls } = mockApprovalFlow({
+      eventType: 'FULL_INVENTORY',
+      nestStatus: 'hatching',
+      eggsReburied: 0,
+      totalEggs: 100,
+    });
+
+    const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
+
+    expect(res.status).toBe(200);
+    expect(wroteNestStatus(calls, 'hatched')).toBe(true);
+  });
+
+  it('moves an incubating nest to hatching when a PARTIAL_INVENTORY (0 < eggs_reburied < total_eggs) review is approved', async () => {
+    const { calls } = mockApprovalFlow({
+      eventType: 'PARTIAL_INVENTORY',
+      nestStatus: 'incubating',
+      eggsReburied: 40,
+      totalEggs: 100,
+    });
+
+    const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
+
+    expect(res.status).toBe(200);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(true);
+  });
+
+  it('does not touch turtle_nests for a TOP_EGG nest_event', async () => {
+    const { calls } = mockApprovalFlow({ eventType: 'TOP_EGG', nestStatus: 'incubating' });
+
+    const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
+
+    expect(res.status).toBe(200);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(false);
+    expect(wroteNestStatus(calls, 'hatched')).toBe(false);
     expect(wroteNestAudit(calls)).toBe(false);
   });
 
-  it('is idempotent: a nest already hatching is not re-updated or re-audited', async () => {
+  it('is idempotent: a nest already hatching is not re-updated or re-audited by another EMERGENCE approval', async () => {
     const { calls } = mockApprovalFlow({ eventType: 'EMERGENCE', nestStatus: 'hatching' });
 
     const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
 
     expect(res.status).toBe(200);
-    expect(wroteNestHatching(calls)).toBe(false);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(false);
+    expect(wroteNestAudit(calls)).toBe(false);
+  });
+
+  it('is idempotent: an already-hatched nest is not re-updated by another inventory approval', async () => {
+    const { calls } = mockApprovalFlow({
+      eventType: 'FULL_INVENTORY',
+      nestStatus: 'hatched',
+      eggsReburied: 0,
+      totalEggs: 100,
+    });
+
+    const res = await asLeader(request(app).post('/reviews/5/approve')).send({});
+
+    expect(res.status).toBe(200);
+    expect(wroteNestStatus(calls, 'hatched')).toBe(false);
     expect(wroteNestAudit(calls)).toBe(false);
   });
 
@@ -129,12 +201,14 @@ describe('approving a nest_event side effect (QA-070)', () => {
     const res = await asLeader(request(app).post('/reviews/5/reject')).send({ note: 'Wrong beach.' });
 
     expect(res.status).toBe(200);
-    expect(calls.some((c) => c.text.includes('SELECT event_type, nest_id FROM turtle_nest_events'))).toBe(false);
-    expect(wroteNestHatching(calls)).toBe(false);
+    expect(
+      calls.some((c) => c.text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events'))
+    ).toBe(false);
+    expect(wroteNestStatus(calls, 'hatching')).toBe(false);
   });
 
   describe('via /reviews/bulk-approve', () => {
-    it('applies the transition only for the emergence row in a mixed batch', async () => {
+    it('applies the correct distinct transition to each row in a mixed EMERGENCE/INVENTORY batch', async () => {
       const calls = [];
       vi.spyOn(db, 'query').mockImplementation((sql, params) => {
         const text = String(sql);
@@ -148,15 +222,17 @@ describe('approving a nest_event side effect (QA-070)', () => {
             ],
           });
         }
-        if (text.includes('SELECT event_type, nest_id FROM turtle_nest_events')) {
+        if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
           const id = params[0];
-          if (id === 11) return Promise.resolve({ rows: [{ event_type: 'EMERGENCE', nest_id: 90 }] });
-          return Promise.resolve({ rows: [{ event_type: 'INVENTORY', nest_id: 91 }] });
+          if (id === 11) {
+            return Promise.resolve({ rows: [{ event_type: 'EMERGENCE', nest_id: 90, eggs_reburied: null, total_eggs: null }] });
+          }
+          return Promise.resolve({ rows: [{ event_type: 'FULL_INVENTORY', nest_id: 91, eggs_reburied: 0, total_eggs: 50 }] });
         }
-        if (text.includes("SELECT nest_code, status FROM turtle_nests") && text.includes("status = 'incubating'")) {
+        if (text.includes('SELECT nest_code, status FROM turtle_nests') && text.includes('status = ANY')) {
           return Promise.resolve({ rows: [{ nest_code: 'LG2-9', status: 'incubating' }] });
         }
-        if (text.includes("UPDATE turtle_nests SET status = 'hatching'")) {
+        if (text.includes('UPDATE turtle_nests SET status = $2')) {
           return Promise.resolve({ rows: [{ nest_code: 'LG2-9' }] });
         }
         return Promise.resolve({ rows: [] });
@@ -165,9 +241,14 @@ describe('approving a nest_event side effect (QA-070)', () => {
       const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6] });
 
       expect(res.status).toBe(200);
-      const hatchingUpdates = calls.filter((c) => c.text.includes("UPDATE turtle_nests SET status = 'hatching'"));
-      expect(hatchingUpdates).toHaveLength(1);
-      expect(hatchingUpdates[0].params[0]).toBe(90);
+      const statusUpdates = calls.filter((c) => c.text.includes('UPDATE turtle_nests SET status = $2'));
+      expect(statusUpdates).toHaveLength(2);
+
+      const emergenceUpdate = statusUpdates.find((c) => c.params[0] === 90);
+      expect(emergenceUpdate.params[1]).toBe('hatching');
+
+      const inventoryUpdate = statusUpdates.find((c) => c.params[0] === 91);
+      expect(inventoryUpdate.params[1]).toBe('hatched');
     });
   });
 });
