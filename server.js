@@ -2981,11 +2981,23 @@ const insertTurtleSurveyEvent = async (executor, body) => {
   return { row: result.rows[0] };
 };
 
-app.post("/turtle_survey_events/create", async (req, res) => {
+app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, res) => {
   try {
+    const { turtle_id } = req.body;
+    if (turtle_id !== undefined && turtle_id !== null) {
+      if (!/^\d+$/.test(String(turtle_id))) {
+        return res.status(400).json({ error: "turtle_id must be a number." });
+      }
+      const turtleCheck = await db.query(`SELECT id FROM turtles WHERE id = $1;`, [turtle_id]);
+      if (turtleCheck.rows.length === 0) {
+        return res.status(404).json({ error: "Turtle not found." });
+      }
+    }
+
     const { error, row } = await insertTurtleSurveyEvent(db, req.body);
     if (error) return res.status(400).json({ error });
 
+    const review = await queueReviewSafely("turtle", turtle_id, req);
     await recordAudit(db, {
       recordType: "turtle_survey_event",
       recordId: row.id,
@@ -2996,7 +3008,8 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 
     res.json({
       message: "Turtle survey event created successfully",
-      event: row
+      event: row,
+      review
     });
   } catch (err) {
     console.error("Create turtle survey event error:", err);

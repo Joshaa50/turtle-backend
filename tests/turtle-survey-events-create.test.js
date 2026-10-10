@@ -15,6 +15,11 @@ const leaderToken = jwt.sign(
   SECRET,
   { expiresIn: '1h' },
 );
+const volunteerToken = jwt.sign(
+  { sub: '50', role: 'Field Volunteer', email: 'volunteer@turtleguard.demo' },
+  SECRET,
+  { expiresIn: '1h' },
+);
 const auth = (req) => req.set('Authorization', `Bearer ${leaderToken}`);
 
 const validEvent = {
@@ -26,10 +31,17 @@ const validEvent = {
 };
 
 beforeEach(() => {
-  vi.spyOn(db, 'query').mockImplementation(async (sql) => {
+  vi.spyOn(db, 'query').mockImplementation(async (sql, params) => {
     const text = String(sql);
     if (text.includes('INSERT INTO turtle_survey_events')) {
       return { rows: [{ id: 901, turtle_id: 42, event_type: 'Nesting' }] };
+    }
+    if (text.includes('FROM turtles')) {
+      if (params?.[0] === 999999) return { rows: [] };
+      return { rows: [{ id: params?.[0] ?? 42 }] };
+    }
+    if (text.includes('INSERT INTO record_reviews')) {
+      return { rows: [{ id: 1, record_type: 'turtle', record_id: params?.[1], status: 'pending', submitted_at: new Date() }] };
     }
     return { rows: [] };
   });
@@ -58,5 +70,43 @@ describe('POST /turtle_survey_events/create', () => {
     const res = await auth(request(app).post('/turtle_survey_events/create')).send(rest);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(new RegExp(field));
+  });
+
+  // QA-082: an unknown turtle_id must 404, not 500.
+  it('404s for an unknown turtle_id', async () => {
+    const res = await auth(request(app).post('/turtle_survey_events/create')).send({
+      ...validEvent, turtle_id: 999999,
+    });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/not found/i);
+  });
+
+  it('400s for a non-numeric turtle_id', async () => {
+    const res = await auth(request(app).post('/turtle_survey_events/create')).send({
+      ...validEvent, turtle_id: 'abc',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // QA-082: a Volunteer's submission must be held for review, not go live
+  // silently with nothing in the Review Queue.
+  it('queues a Field Volunteer submission for review', async () => {
+    const res = await request(app)
+      .post('/turtle_survey_events/create')
+      .set('Authorization', `Bearer ${volunteerToken}`)
+      .send(validEvent);
+    expect(res.status).toBe(200);
+    expect(res.body.review).toBeTruthy();
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO record_reviews'),
+      expect.anything(),
+    );
+  });
+
+  // A reviewer role's own submission is not held for review.
+  it('does not queue a Field Leader submission for review', async () => {
+    const res = await auth(request(app).post('/turtle_survey_events/create')).send(validEvent);
+    expect(res.status).toBe(200);
+    expect(res.body.review).toBeFalsy();
   });
 });
