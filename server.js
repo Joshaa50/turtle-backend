@@ -4294,6 +4294,17 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 
     await client.query(`DELETE FROM morning_survey_nests WHERE nest_id = $1;`, [id]);
 
+    // Same reasoning as the nest's own review row below: a deleted event
+    // leaves nothing for its review row to point at, so every event's
+    // review goes with it too, whatever its status.
+    const eventIds = events.rows.map((r) => r.id);
+    if (eventIds.length > 0) {
+      await client.query(
+        `DELETE FROM record_reviews WHERE record_type = 'nest_event' AND record_id = ANY($1::int[]);`,
+        [eventIds]
+      );
+    }
+
     // See the matching comment in DELETE /turtles/:id.
     await client.query(
       `DELETE FROM record_reviews WHERE record_type = 'nest' AND record_id = $1;`,
