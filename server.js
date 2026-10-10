@@ -1769,6 +1769,26 @@ if (require.main === module) {
 // a NOT NULL left over from before that change still rejected a save with
 // any of the three blank. Same boot-time, idempotent pattern as
 // turtles.is_archived above.
+// QA-072: a hatchling track logged mid-walk (via /nest-events/create) is
+// created before the morning survey row that will carry it exists, so it
+// cannot be folded into the survey's review at creation time the way linked
+// nests/emergences are. survey_id lets the frontend pass that link once the
+// survey row has been created; see foldIntoSurveyReview below. Plain
+// INTEGER, no FK - every cross-table id in this schema is a bare integer,
+// enforced at the app layer. Same boot-time, idempotent pattern as
+// turtles.is_archived above; no backfill, this only applies going forward.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtle_nest_events ADD COLUMN IF NOT EXISTS survey_id INTEGER;`);
+      await db.query(`CREATE INDEX IF NOT EXISTS turtle_nest_events_survey_id_idx ON turtle_nest_events (survey_id);`);
+      console.log("turtle_nest_events.survey_id is present.");
+    } catch (err) {
+      console.error("Could not ensure turtle_nest_events.survey_id:", err.message);
+    }
+  })();
+}
+
 if (require.main === module) {
   (async () => {
     try {
@@ -2481,6 +2501,23 @@ const queueReviewSafely = async (recordType, recordId, req) => {
 // nest_event of an emergence/hatching type is therefore the trigger point,
 // not the event's own creation.
 const applyApprovalSideEffects = async (recordType, recordId, req) => {
+  // QA-072: approving the survey as a whole must fire the same side effects
+  // as approving each folded nest_event directly would - folding the review
+  // rows together must not also fold away the nest status transitions.
+  if (recordType === "morning_survey") {
+    try {
+      const folded = await db.query(
+        `SELECT id FROM turtle_nest_events WHERE survey_id = $1;`,
+        [recordId]
+      );
+      for (const row of folded.rows) {
+        await applyApprovalSideEffects("nest_event", row.id, req);
+      }
+    } catch (err) {
+      console.error(`Could not propagate approval side effects for survey ${recordId}:`, err.message);
+    }
+    return;
+  }
   if (recordType !== "nest_event") return;
   try {
     const ev = await db.query(
@@ -3715,7 +3752,8 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
       notes,
       start_time,
       end_time,
-      observer
+      observer,
+      survey_id
     } = req.body;
 
     if (!event_type || !nest_code) {
@@ -3770,12 +3808,12 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
         piped_alive_count, alive_within, dead_within, alive_above, dead_above,
         reburied_depth_top_egg_h, reburied_depth_bottom_chamber_h, reburied_width_w,
         reburied_distance_to_sea_s, reburied_gps_lat, reburied_gps_long,
-        notes, start_time, end_time, observer
+        notes, start_time, end_time, observer, survey_id
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
-        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57
+        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58
       )
       RETURNING *;
     `;
@@ -3796,11 +3834,17 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
       piped_alive_count || null, alive_within || null, dead_within || null, alive_above || null, dead_above || null,
       reburied_depth_top_egg_h || null, reburied_depth_bottom_chamber_h || null, reburied_width_w || null,
       reburied_distance_to_sea_s || null, reburied_gps_lat || null, reburied_gps_long || null,
-      notes || null, start_time || null, end_time || null, observer || null
+      notes || null, start_time || null, end_time || null, observer || null, survey_id || null
     ];
 
     const result = await db.query(sql, values);
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
+    // QA-072: a hatchling track logged as part of a morning survey walk is
+    // part of that one form, same as a linked nest/emergence - fold its own
+    // review into the survey's, when the survey is itself under review.
+    if (survey_id) {
+      await foldIntoSurveyReview(survey_id, "nest_event", result.rows[0].id);
+    }
     await recordAudit(db, { recordType: "nest_event", recordId: result.rows[0]?.id, action: "created", req,
       summary: describeNestEvent(result.rows[0]) });
     // The event's own audit row is on the event; the nest's history is what a
@@ -5646,6 +5690,11 @@ const REVIEW_DETAIL_SQL = {
                                 )) ORDER BY te.id)
                               FROM morning_survey_emergences mse JOIN turtle_emergences te ON te.id = mse.emergence_id
                               WHERE mse.survey_id = ms.id
+                            ), '[]'::jsonb),
+                            'linked_tracks', COALESCE((
+                              SELECT jsonb_agg(to_jsonb(ev) ORDER BY ev.id)
+                              FROM turtle_nest_events ev
+                              WHERE ev.survey_id = ms.id
                             ), '[]'::jsonb)
                           )) AS detail
                    FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
