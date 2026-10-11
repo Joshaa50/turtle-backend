@@ -1520,18 +1520,6 @@ const eraseUserRow = async (client, person, { req, summary }) => {
   };
 };
 
-// TEMP QA-089 DIAGNOSTIC - remove after use.
-app.get("/_qa089_schema_check", requireRole(COORDINATOR), async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'turtle_survey_events' AND column_name LIKE 'time_%' ORDER BY column_name;`
-    );
-    res.json({ columns: result.rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
@@ -1819,11 +1807,14 @@ if (require.main === module) {
 
 // QA-089: NIGHT_SURVEY timing fields (first seen, start of egg laying,
 // covering, camouflage, reached sea) are sent by insertTurtleSurveyEvent on
-// every create, but turtle_survey_events was never altered to add these
-// columns - any request where one was non-null failed with a Postgres
-// "column ... does not exist" error that the route's generic catch
-// flattened into a bare 500. Same boot-time, idempotent pattern as
-// turtles.is_archived above.
+// every create. These columns already existed on the live table as
+// "timestamp without time zone" (added outside any migration in this repo),
+// not TIME - so a bare "HH:MM" value failed to cast into a full timestamp
+// with a Postgres error that the route's generic catch flattened into a
+// bare 500. ADD COLUMN IF NOT EXISTS was a no-op against the existing
+// mistyped columns; force the type instead. No non-null data has ever been
+// successfully written to these columns (every create with a real value
+// failed), so this cast is safe.
 if (require.main === module) {
   (async () => {
     try {
@@ -1832,7 +1823,12 @@ if (require.main === module) {
       await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_covering TIME;`);
       await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_end_camouflage TIME;`);
       await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_reach_sea TIME;`);
-      console.log("turtle_survey_events time_* columns are present.");
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_first_seen TYPE TIME USING time_first_seen::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_start_egg_laying TYPE TIME USING time_start_egg_laying::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_covering TYPE TIME USING time_covering::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_end_camouflage TYPE TIME USING time_end_camouflage::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_reach_sea TYPE TIME USING time_reach_sea::time;`);
+      console.log("turtle_survey_events time_* columns are present and typed TIME.");
     } catch (err) {
       console.error("Could not ensure turtle_survey_events time_* columns:", err.message);
     }
