@@ -1805,6 +1805,28 @@ if (require.main === module) {
   })();
 }
 
+// QA-089: NIGHT_SURVEY timing fields (first seen, start of egg laying,
+// covering, camouflage, reached sea) are sent by insertTurtleSurveyEvent on
+// every create, but turtle_survey_events was never altered to add these
+// columns - any request where one was non-null failed with a Postgres
+// "column ... does not exist" error that the route's generic catch
+// flattened into a bare 500. Same boot-time, idempotent pattern as
+// turtles.is_archived above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_first_seen TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_start_egg_laying TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_covering TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_end_camouflage TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_reach_sea TIME;`);
+      console.log("turtle_survey_events time_* columns are present.");
+    } catch (err) {
+      console.error("Could not ensure turtle_survey_events time_* columns:", err.message);
+    }
+  })();
+}
+
 //--------------------------------------------------------------
 // Volunteer submissions awaiting a Field Leader's confirmation.
 //

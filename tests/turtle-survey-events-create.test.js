@@ -109,4 +109,39 @@ describe('POST /turtle_survey_events/create', () => {
     expect(res.status).toBe(200);
     expect(res.body.review).toBeFalsy();
   });
+
+  // QA-089: a NIGHT_SURVEY body with any timing field set 500'd in
+  // production, because insertTurtleSurveyEvent always inserts
+  // time_first_seen/time_start_egg_laying/time_covering/time_end_camouflage/
+  // time_reach_sea but no boot migration had ever added those columns to
+  // turtle_survey_events - only reachable against the real database, not
+  // the mocked one below, so this is a source-level check that each column
+  // insertTurtleSurveyEvent writes has a matching migration, same pattern as
+  // the audit-trail "creates record_audit only after the pool it uses
+  // exists" test.
+  it('migrates every time_* column that insertTurtleSurveyEvent inserts', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+    const timeColumns = [
+      'time_first_seen', 'time_start_egg_laying', 'time_covering',
+      'time_end_camouflage', 'time_reach_sea',
+    ];
+    for (const column of timeColumns) {
+      const pattern = new RegExp(
+        `ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS ${column}\\b`,
+      );
+      expect(src).toMatch(pattern);
+    }
+  });
+
+  // Endpoint-level happy path: a NIGHT_SURVEY body with a timing field set
+  // must still reach the (mocked) INSERT and return 200, not fail earlier
+  // validation - the 500 this bug caused only shows up against a real
+  // database missing the column, covered by the migration check above.
+  it('saves a night survey event with a timing field set', async () => {
+    const res = await auth(request(app).post('/turtle_survey_events/create')).send({
+      ...validEvent, event_type: 'NIGHT_SURVEY', time_first_seen: '21:15',
+    });
+    expect(res.status).toBe(200);
+  });
 });
