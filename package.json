@@ -12,7 +12,8 @@
     "qa:seed": "node scripts/qa-seed.mjs",
     "qa:audit": "node scripts/qa-cleanup.mjs --audit",
     "demo:tidy": "node scripts/demo-tidy.mjs",
-    "demo:seed": "node scripts/demo-seed-activity.mjs"
+    "demo:seed": "node scripts/demo-seed-activity.mjs",
+    "demo:reset": "node scripts/demo-reset.mjs"
   },
   "keywords": [],
   "author": "",

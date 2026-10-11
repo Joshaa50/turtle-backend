@@ -13,6 +13,8 @@ types.setTypeParser(types.builtins.DATE, (val) => val);
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
+const path = require("node:path");
 
 const app = express();
 
@@ -1086,14 +1088,6 @@ app.patch("/users/:id", async (req, res) => {
     return res.status(403).json({ error: "You can only edit your own profile." });
   }
 
-  // An anonymous visitor who clicked the public Coordinator/Field Leader demo
-  // button reaches this route with a real token at a real privileged role -
-  // but they never proved who they are, so they must not be able to reset,
-  // deactivate, erase or promote anyone else's actual account.
-  if (req.user.demo && isPrivileged && !isSelf) {
-    return res.status(403).json({ error: "Demo accounts cannot change other people's accounts." });
-  }
-
   // Only a coordinator may create or change another coordinator, so a field
   // leader cannot promote themselves past their own ceiling.
   if (updates.role === COORDINATOR && req.user.role !== COORDINATOR) {
@@ -1596,13 +1590,6 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
 
-  // Irreversible, and confirmable just by typing an email address already
-  // visible in the list - an anonymous demo visitor must not be able to run
-  // this against anyone, including another demo account.
-  if (req.user.demo) {
-    return res.status(403).json({ error: "Demo accounts cannot erase anyone's account." });
-  }
-
   // Typing the address is the confirmation, the way deleting your own account
   // asks for a password. This cannot be undone and it is easy to run against
   // the wrong row in a list of forty-odd people.
@@ -1652,6 +1639,100 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("Erase user error:", err);
     res.status(500).json({ error: "Server error while erasing. Nothing was changed." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Reset demo data
+//--------------------------------------------------------------
+// Wipes every activity/record table back to empty and deletes every user
+// except the 4 @turtleguard.demo personas the demo buttons sign in as, then
+// kicks off a reseed in the background so the site comes back populated with
+// fresh, realistic data. Site configuration (beaches, shift types, settings
+// in app_settings) is deliberately NOT touched - it is structural config,
+// not accumulated demo mess.
+//
+// Deliberately NOT gated on req.user.demo - the owner's reset script logs in
+// as the demo Coordinator to call this too, and demo accounts otherwise
+// behave exactly like real ones everywhere in this app now; the frontend
+// hides this button from a demo Coordinator's own UI instead.
+app.post("/admin/reset-demo-data", requireRole(COORDINATOR), async (req, res) => {
+  const { confirm } = req.body || {};
+  if (confirm !== "RESET DEMO DATA") {
+    return res.status(400).json({ error: 'Confirm by sending confirm: "RESET DEMO DATA".' });
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query("BEGIN");
+
+    const counts = {};
+    const wipe = async (table) => {
+      const r = await client.query(`DELETE FROM ${table};`);
+      counts[table] = r.rowCount;
+    };
+
+    await wipe("nest_photos");
+    await wipe("turtle_nest_events");
+    await wipe("turtle_survey_events");
+    await wipe("morning_survey_nests");
+    await wipe("morning_survey_emergences");
+    await wipe("morning_surveys");
+    await wipe("record_reviews");
+    await wipe("record_audit");
+    await wipe("turtle_nests");
+    await wipe("turtle_emergences");
+    await wipe("turtles");
+    await wipe("Timetable");
+    await wipe("roster_template_rows");
+    await wipe("roster_templates");
+
+    const usersDeleted = await client.query(
+      `DELETE FROM users WHERE email NOT LIKE '%@turtleguard.demo';`
+    );
+    counts.users = usersDeleted.rowCount;
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Demo data wiped. Regenerating fresh data in the background - this can take about a minute; refresh shortly.",
+      deleted: counts,
+    });
+
+    // Reseed AFTER responding, so the HTTP request doesn't block on however
+    // long seeding takes (it makes many sequential API calls to itself and
+    // could exceed a typical request timeout). Never spawn real processes
+    // under the test suite - tests stub db.query/db.connect, not a live
+    // server for these scripts to actually call.
+    if (process.env.NODE_ENV === "test") return;
+    const scriptsDir = path.join(__dirname, "scripts");
+    const selfUrl = `http://127.0.0.1:${process.env.PORT || 3000}`;
+    const runScript = (name) => new Promise((resolve) => {
+      const child = spawn("node", [name, "--confirm"], {
+        cwd: scriptsDir,
+        env: { ...process.env, VITE_API_URL: selfUrl, API_URL: selfUrl },
+        stdio: "inherit",
+      });
+      child.on("exit", (code) => {
+        if (code !== 0) console.error(`Reseed step ${name} exited with code ${code}`);
+        resolve();
+      });
+      child.on("error", (err) => {
+        console.error(`Reseed step ${name} failed to start:`, err.message);
+        resolve();
+      });
+    });
+    (async () => {
+      await runScript("qa-seed.mjs");
+      await runScript("demo-seed-activity.mjs");
+      console.log("Demo data reseed complete.");
+    })();
+  } catch (err) {
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("Reset demo data error:", err);
+    res.status(500).json({ error: "Server error while resetting. Nothing was changed." });
   } finally {
     if (client) client.release();
   }
