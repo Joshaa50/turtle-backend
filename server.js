@@ -3861,6 +3861,17 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
 
     const result = await db.query(sql, values);
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
+    // QA-090: when this submitter's role does not require review for
+    // nest_event (the default for everyone except Field Volunteer),
+    // queueReviewSafely never inserts a record_reviews row, so nothing in
+    // the approval flow (decideReview / bulk-approve / applyAutoApprove)
+    // will ever run applyApprovalSideEffects for this event. Treat "no
+    // review required" the same as "already approved" and fire the nest
+    // status transition immediately - this is the only place that will
+    // ever do so for such a submission.
+    if (!review) {
+      await applyApprovalSideEffects("nest_event", result.rows[0]?.id, req);
+    }
     // QA-072: a hatchling track logged as part of a morning survey walk is
     // part of that one form, same as a linked nest/emergence - fold its own
     // review into the survey's, when the survey is itself under review.

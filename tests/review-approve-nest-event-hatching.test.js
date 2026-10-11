@@ -207,6 +207,61 @@ describe('approving a nest_event side effect (QA-070 / QA-075)', () => {
     expect(wroteNestStatus(calls, 'hatching')).toBe(false);
   });
 
+  // QA-090: a Field Leader/Coordinator/Assistant creating a nest_event never
+  // gets a record_reviews row (needsReview is false for everyone but Field
+  // Volunteer by default), so decideReview/bulk-approve/applyAutoApprove
+  // never run for it - POST /nest-events/create must apply the nest status
+  // transition itself, synchronously, in that case.
+  describe('creating a nest_event that needs no review (QA-090)', () => {
+    it('moves the nest straight to hatched when a Field Leader saves a FULL_INVENTORY (eggs_reburied: 0), with no record_reviews row involved', async () => {
+      const calls = [];
+      vi.spyOn(db, 'query').mockImplementation((sql, params) => {
+        const text = String(sql);
+        calls.push({ text, params });
+
+        if (text.includes('FROM turtle_nests n') && text.includes('WHERE n.nest_code')) {
+          return Promise.resolve({ rows: [{ id: 90, total_num_eggs: 100, emerged_so_far: 0 }] });
+        }
+        if (text.includes('INSERT INTO turtle_nest_events')) {
+          return Promise.resolve({
+            rows: [{ id: 11, event_type: 'FULL_INVENTORY', nest_id: 90, nest_code: 'LG2-9', eggs_reburied: 0, total_eggs: 100 }],
+          });
+        }
+        if (text.includes('SELECT value FROM app_settings')) {
+          return Promise.resolve({ rows: [] }); // no stored review rules -> default (Volunteer-only)
+        }
+        if (text.includes('INSERT INTO record_reviews')) {
+          // Must never be reached: queueReviewSafely should short-circuit on needsReview === false.
+          return Promise.resolve({ rows: [{ id: 5, record_type: 'nest_event', record_id: 11 }] });
+        }
+        if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+          return Promise.resolve({
+            rows: [{ event_type: 'FULL_INVENTORY', nest_id: 90, eggs_reburied: 0, total_eggs: 100 }],
+          });
+        }
+        if (text.includes('SELECT nest_code, status FROM turtle_nests') && text.includes('status = ANY')) {
+          return Promise.resolve({ rows: [{ nest_code: 'LG2-9', status: 'incubating' }] });
+        }
+        if (text.includes('UPDATE turtle_nests SET status = $2')) {
+          return Promise.resolve({ rows: [{ nest_code: 'LG2-9' }] });
+        }
+        if (text.includes('INSERT INTO record_audit')) {
+          return Promise.resolve({ rows: [{ id: 1 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const res = await asLeader(request(app).post('/nest-events/create')).send({
+        event_type: 'FULL_INVENTORY', nest_code: 'LG2-9', total_eggs: 100, eggs_reburied: 0, hatched_count: 100,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.review).toBeFalsy();
+      expect(calls.some((c) => c.text.includes('INSERT INTO record_reviews'))).toBe(false);
+      expect(wroteNestStatus(calls, 'hatched')).toBe(true);
+    });
+  });
+
   describe('via /reviews/bulk-approve', () => {
     it('applies the correct distinct transition to each row in a mixed EMERGENCE/INVENTORY batch', async () => {
       const calls = [];
