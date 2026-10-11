@@ -1520,6 +1520,18 @@ const eraseUserRow = async (client, person, { req, summary }) => {
   };
 };
 
+// TEMP QA-089 DIAGNOSTIC - remove after use.
+app.get("/_qa089_schema_check", requireRole(COORDINATOR), async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'turtle_survey_events' AND column_name LIKE 'time_%' ORDER BY column_name;`
+    );
+    res.json({ columns: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
@@ -2540,6 +2552,54 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
     }
     return;
   }
+  if (recordType === "turtle") {
+    try {
+      const ev = await db.query(
+        `SELECT * FROM turtle_survey_events WHERE turtle_id = $1 ORDER BY created_at DESC LIMIT 1;`,
+        [recordId]
+      );
+      const row = ev.rows[0];
+      if (!row) return;
+      const updated = await db.query(
+        `UPDATE turtles SET
+           health_condition = $1,
+           front_left_tag = COALESCE(NULLIF($2, ''), front_left_tag),
+           front_left_address = COALESCE(NULLIF($3, ''), front_left_address),
+           front_right_tag = COALESCE(NULLIF($4, ''), front_right_tag),
+           front_right_address = COALESCE(NULLIF($5, ''), front_right_address),
+           rear_left_tag = COALESCE(NULLIF($6, ''), rear_left_tag),
+           rear_left_address = COALESCE(NULLIF($7, ''), rear_left_address),
+           rear_right_tag = COALESCE(NULLIF($8, ''), rear_right_tag),
+           rear_right_address = COALESCE(NULLIF($9, ''), rear_right_address),
+           scl_max = $10, scl_min = $11, scw = $12,
+           ccl_max = $13, ccl_min = $14, ccw = $15,
+           tail_extension = $16, vent_to_tail_tip = $17, total_tail_length = $18,
+           updated_at = NOW()
+         WHERE id = $19
+         RETURNING name;`,
+        [row.health_condition,
+         row.front_left_tag, row.front_left_address,
+         row.front_right_tag, row.front_right_address,
+         row.rear_left_tag, row.rear_left_address,
+         row.rear_right_tag, row.rear_right_address,
+         row.scl_max, row.scl_min, row.scw,
+         row.ccl_max, row.ccl_min, row.ccw,
+         row.tail_extension, row.vent_to_tail_tip, row.total_tail_length,
+         recordId]
+      );
+      if (updated.rows.length === 0) return;
+      await recordAudit(db, {
+        recordType: "turtle",
+        recordId,
+        action: "updated",
+        req,
+        summary: `Profile measurements updated from approved sighting (${updated.rows[0]?.name ?? recordId})`,
+      });
+    } catch (err) {
+      console.error(`Could not apply turtle profile update for turtle ${recordId}:`, err.message);
+    }
+    return;
+  }
   if (recordType !== "nest_event") return;
   try {
     const ev = await db.query(
@@ -3081,6 +3141,16 @@ app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, 
     if (error) return res.status(400).json({ error });
 
     const review = await queueReviewSafely("turtle", turtle_id, req);
+    // QA-091: when this submitter's role does not require review for "turtle"
+    // (the default for everyone except Field Volunteer), queueReviewSafely never
+    // inserts a record_reviews row, so nothing in the approval flow will ever run
+    // applyApprovalSideEffects for this sighting. Treat "no review required" the
+    // same as "already approved" and push the sighting's measurements onto the
+    // turtle's profile immediately - this is the only place that will ever do so
+    // for such a submission.
+    if (!review) {
+      await applyApprovalSideEffects("turtle", turtle_id, req);
+    }
     await recordAudit(db, {
       recordType: "turtle_survey_event",
       recordId: row.id,
