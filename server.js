@@ -742,23 +742,16 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
       SELECT
         id, first_name, last_name, email, role, station,
         is_active, is_email_verified, is_password_reset_needed,
-        created_at, profile_picture
+        created_at, (profile_picture IS NOT NULL) AS has_profile_picture
       FROM users
       ORDER BY station ASC, last_name ASC;
     `;
 
     const result = await db.query(sql);
 
-    const users = result.rows.map(user => ({
-      ...user,
-      profile_picture: user.profile_picture
-        ? user.profile_picture.toString("base64")
-        : null
-    }));
-
     res.json({
       message: "Users fetched successfully",
-      users
+      users: result.rows
     });
   } catch (err) {
     console.error("Get users error:", err);
