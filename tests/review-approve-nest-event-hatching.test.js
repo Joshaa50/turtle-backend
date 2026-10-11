@@ -53,7 +53,7 @@ const mockApprovalFlow = ({
     if (text.includes('UPDATE record_reviews') && params?.[0] === 'approved') {
       return Promise.resolve({ rows: [{ id: 5, record_type: 'nest_event', record_id: 11 }] });
     }
-    if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+    if (text.includes('FROM turtle_nest_events e')) {
       return Promise.resolve({
         rows: [{ event_type: eventType, nest_id: nestId, eggs_reburied: eggsReburied, total_eggs: totalEggs }],
       });
@@ -202,7 +202,7 @@ describe('approving a nest_event side effect (QA-070 / QA-075)', () => {
 
     expect(res.status).toBe(200);
     expect(
-      calls.some((c) => c.text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events'))
+      calls.some((c) => c.text.includes('FROM turtle_nest_events e'))
     ).toBe(false);
     expect(wroteNestStatus(calls, 'hatching')).toBe(false);
   });
@@ -234,7 +234,7 @@ describe('approving a nest_event side effect (QA-070 / QA-075)', () => {
           // Must never be reached: queueReviewSafely should short-circuit on needsReview === false.
           return Promise.resolve({ rows: [{ id: 5, record_type: 'nest_event', record_id: 11 }] });
         }
-        if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+        if (text.includes('FROM turtle_nest_events e')) {
           return Promise.resolve({
             rows: [{ event_type: 'FULL_INVENTORY', nest_id: 90, eggs_reburied: 0, total_eggs: 100 }],
           });
@@ -277,7 +277,7 @@ describe('approving a nest_event side effect (QA-070 / QA-075)', () => {
             ],
           });
         }
-        if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+        if (text.includes('FROM turtle_nest_events e')) {
           const id = params[0];
           if (id === 11) {
             return Promise.resolve({ rows: [{ event_type: 'EMERGENCE', nest_id: 90, eggs_reburied: null, total_eggs: null }] });

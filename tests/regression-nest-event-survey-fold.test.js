@@ -42,7 +42,7 @@ describe('POST /nest-events/create folding into a survey review', () => {
   beforeEach(() => {
     query = vi.spyOn(db, 'query').mockImplementation(async (sql) => {
       const text = String(sql);
-      if (text.includes('SELECT n.id, n.total_num_eggs')) {
+      if (text.includes('SELECT n.id, n.date_found, n.total_num_eggs')) {
         return { rows: [{ id: 90, total_num_eggs: 100, emerged_so_far: 0 }] };
       }
       if (text.includes('INSERT INTO turtle_nest_events')) {
@@ -92,7 +92,7 @@ describe('approving a morning_survey propagates to its folded nest_events (QA-07
       if (text.includes('SELECT id FROM turtle_nest_events WHERE survey_id')) {
         return Promise.resolve({ rows: [{ id: 11 }] });
       }
-      if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+      if (text.includes('FROM turtle_nest_events e')) {
         return Promise.resolve({ rows: [{ event_type: 'EMERGENCE', nest_id: 90, eggs_reburied: null, total_eggs: null }] });
       }
       if (text.includes('SELECT nest_code, status FROM turtle_nests') && text.includes('status = ANY')) {
@@ -135,7 +135,7 @@ describe('approving a morning_survey propagates to its folded nest_events (QA-07
       if (text.includes('SELECT id FROM turtle_nest_events WHERE survey_id')) {
         return Promise.resolve({ rows: [{ id: 11 }] });
       }
-      if (text.includes('SELECT event_type, nest_id, eggs_reburied, total_eggs FROM turtle_nest_events')) {
+      if (text.includes('FROM turtle_nest_events e')) {
         const id = params[0];
         if (id === 11) {
           return Promise.resolve({ rows: [{ event_type: 'EMERGENCE', nest_id: 90, eggs_reburied: null, total_eggs: null }] });
