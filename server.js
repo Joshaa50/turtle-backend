@@ -2698,7 +2698,8 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
   if (recordType !== "nest_event") return;
   try {
     const ev = await db.query(
-      `SELECT e.event_type, e.nest_id, e.eggs_reburied, e.total_eggs, e.created_at, n.date_found
+      `SELECT e.event_type, e.nest_id, e.eggs_reburied, e.total_eggs, e.created_at, n.date_found,
+              e.original_depth_top_egg_h, e.original_depth_bottom_chamber_h, e.original_width_w
        FROM turtle_nest_events e LEFT JOIN turtle_nests n ON n.id = e.nest_id WHERE e.id = $1;`,
       [recordId]
     );
@@ -2718,6 +2719,34 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
       targetStatus = "hatching";
       fromStatuses = ["incubating"];
     } else if (isExcavationType(type)) {
+      // Many nests are found already laid or in a rush, with no chamber
+      // depth/width on record from NestEntry - the final inventory is often
+      // the first and only time anyone actually measures the chamber
+      // (QA-098). Fill in only what the nest doesn't already have; never
+      // overwrite a real measurement taken when the nest was first logged.
+      if (row.original_depth_top_egg_h != null || row.original_depth_bottom_chamber_h != null || row.original_width_w != null) {
+        const backfilled = await db.query(
+          `UPDATE turtle_nests SET
+             depth_top_egg_h = COALESCE(depth_top_egg_h, $2),
+             depth_bottom_chamber_h = COALESCE(depth_bottom_chamber_h, $3),
+             width_w = COALESCE(width_w, $4),
+             updated_at = NOW()
+           WHERE id = $1
+             AND (depth_top_egg_h IS NULL OR depth_bottom_chamber_h IS NULL OR width_w IS NULL)
+           RETURNING nest_code;`,
+          [row.nest_id, row.original_depth_top_egg_h, row.original_depth_bottom_chamber_h, row.original_width_w]
+        );
+        if (backfilled.rows.length > 0) {
+          await recordAudit(db, {
+            recordType: "nest",
+            recordId: row.nest_id,
+            action: "updated",
+            req,
+            summary: `Chamber depth/width filled in from inventory measurements (${backfilled.rows[0].nest_code})`,
+          });
+        }
+      }
+
       // TOP_EGG does not match isExcavationType, so a top-egg check never
       // moves status - matches the old frontend's isTopEggCheck guard.
       const reburied = Number(row.eggs_reburied) || 0;
