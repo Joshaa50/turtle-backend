@@ -272,6 +272,22 @@ const minExceedsMaxError = (body) => {
   return null;
 };
 
+// The straight-line carapace length (SCL) can never exceed the length
+// measured along the shell's curve (CCL) - the curved path over a dome is
+// always at least as long as the straight line under it, for every species.
+// SCL > CCL is not an unusual turtle, it is two fields swapped or a
+// misread tape - QA-102.
+const sclExceedsCclError = (body) => {
+  for (const [sclKey, cclKey, label] of [["scl_max", "ccl_max", "MAX"], ["scl_min", "ccl_min", "MIN"]]) {
+    const scl = asNumber(body[sclKey]);
+    const ccl = asNumber(body[cclKey]);
+    if (scl !== null && ccl !== null && scl > ccl) {
+      return `SCL ${label} (${scl}) cannot be greater than CCL ${label} (${ccl}) - curved length is always at least straight length.`;
+    }
+  }
+  return null;
+};
+
 // Range plus the two things a nest cannot be regardless of range: more eggs left
 // than were ever laid, and a chamber floor above its ceiling.
 const invalidNest = (body) => {
@@ -1776,6 +1792,9 @@ const insertTurtle = async (executor, body) => {
   const measurementErr = minExceedsMaxError(body);
   if (measurementErr) return { error: measurementErr };
 
+  const sclCclErr = sclExceedsCclError(body);
+  if (sclCclErr) return { error: sclCclErr };
+
   const notInList = await listError(body);
   if (notInList) return { error: notInList };
 
@@ -2958,6 +2977,11 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: measurementErr });
     }
 
+    const sclCclErr = sclExceedsCclError(req.body);
+    if (sclCclErr) {
+      return res.status(400).json({ error: sclCclErr });
+    }
+
     const notInList = await listError(req.body, async () =>
       (await db.query("SELECT species, health_condition FROM turtles WHERE id = $1 LIMIT 1;", [id])).rows[0] || {}
     );
@@ -3212,6 +3236,9 @@ const insertTurtleSurveyEvent = async (executor, body) => {
 
   const measurementErr = minExceedsMaxError(body);
   if (measurementErr) return { error: measurementErr };
+
+  const sclCclErr = sclExceedsCclError(body);
+  if (sclCclErr) return { error: sclCclErr };
 
   const sql = `
     INSERT INTO turtle_survey_events (
@@ -3704,6 +3731,23 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Nest not found." });
+    }
+
+    // QA-101: a nest is created with its own 1:1 emergence row, which gets
+    // its own copy of the nest's GPS at creation time (see POST
+    // /nests/create) rather than deriving it. Correcting the nest's position
+    // here must not leave that copy stale - the emergence list, CSV and any
+    // map/survey use of emergences would otherwise keep showing the old,
+    // wrong coordinate even after the nest itself was fixed.
+    if (result.rows[0].emergence_id) {
+      try {
+        await db.query(
+          `UPDATE turtle_emergences SET gps_lat = $1, gps_long = $2 WHERE id = $3;`,
+          [gps_lat, gps_long, result.rows[0].emergence_id]
+        );
+      } catch (err) {
+        console.error(`Could not sync emergence ${result.rows[0].emergence_id} GPS after nest ${id} update:`, err.message);
+      }
     }
 
     const changes = describeNestChanges(before.rows[0], result.rows[0]);
@@ -4900,6 +4944,26 @@ app.delete("/shifts/:id", requireRole(COORDINATOR), async (req, res) => {
 // Timetable table
 //--------------------------------------------------------------
 
+// QA-103: whether two shifts on the same day actually clash, by clock time -
+// not just whether they're literally the same shift_id (the only thing the
+// table's unique constraint below catches). Shift times are "HH:MM:SS"
+// strings; a shift whose end is not after its start is treated as crossing
+// midnight (e.g. a Night shift 20:00-02:00) so it isn't wrongly cleared
+// against anything after its start that same evening.
+const timeToMinutes = (t) => {
+  if (!t) return null;
+  const [h, m] = String(t).split(':').map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+};
+const shiftsOverlap = (aStart, aEnd, bStart, bEnd) => {
+  let as = timeToMinutes(aStart), ae = timeToMinutes(aEnd);
+  let bs = timeToMinutes(bStart), be = timeToMinutes(bEnd);
+  if (as === null || ae === null || bs === null || be === null) return false;
+  if (ae <= as) ae += 24 * 60;
+  if (be <= bs) be += 24 * 60;
+  return as < be && bs < ae;
+};
+
 // Create a new shift assignment
 app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
@@ -4909,13 +4973,34 @@ app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res)
   }
 
   try {
+    const [newShift, thatDay] = await Promise.all([
+      db.query(`SELECT start_time, end_time FROM shifts WHERE shift_id = $1;`, [shift_id]),
+      db.query(
+        `SELECT s.shift_id, s.shift_name, s.start_time, s.end_time
+         FROM Timetable t JOIN shifts s ON s.shift_id = t.shift_id
+         WHERE t.user_id = $1 AND t.work_date = $2;`,
+        [user_id, work_date]
+      ),
+    ]);
+    const ns = newShift.rows[0];
+    if (ns) {
+      const clash = thatDay.rows.find(
+        (r) => r.shift_id !== shift_id && shiftsOverlap(ns.start_time, ns.end_time, r.start_time, r.end_time)
+      );
+      if (clash) {
+        return res.status(409).json({
+          error: `This person is already booked on "${clash.shift_name}" (${clash.start_time}-${clash.end_time}) that day, which overlaps this shift.`,
+        });
+      }
+    }
+
     const query = `
       INSERT INTO Timetable (user_id, shift_id, work_date)
       VALUES ($1, $2, $3)
       RETURNING *;
     `;
     const values = [user_id, shift_id, work_date];
-    
+
     const result = await db.query(query, values);
 
     res.status(201).json({
