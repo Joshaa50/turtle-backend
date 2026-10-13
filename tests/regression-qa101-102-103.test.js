@@ -107,12 +107,12 @@ describe('POST /timetable/create rejects an overlapping shift for the same perso
   it('409s when the new shift overlaps one the person already has that day', async () => {
     vi.spyOn(db, 'query').mockImplementation((sql, params) => {
       const text = String(sql);
-      if (text.includes('SELECT start_time, end_time FROM shifts WHERE shift_id = $1')) {
-        return Promise.resolve({ rows: [{ start_time: '06:00:00', end_time: '08:00:00' }] });
+      if (text.includes('SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1')) {
+        return Promise.resolve({ rows: [{ start_time: '06:00:00', end_time: '08:00:00', shift_type: 'Morning' }] });
       }
       if (text.includes('FROM Timetable t JOIN shifts s')) {
         return Promise.resolve({
-          rows: [{ shift_id: 2, shift_name: 'Vatsa Beach Survey', start_time: '06:00:00', end_time: '08:00:00' }],
+          rows: [{ shift_id: 2, shift_name: 'Vatsa Beach Survey', start_time: '06:00:00', end_time: '08:00:00', shift_type: 'Morning' }],
         });
       }
       return Promise.resolve({ rows: [] });
@@ -129,12 +129,12 @@ describe('POST /timetable/create rejects an overlapping shift for the same perso
   it('allows a non-overlapping shift on the same day', async () => {
     vi.spyOn(db, 'query').mockImplementation((sql, params) => {
       const text = String(sql);
-      if (text.includes('SELECT start_time, end_time FROM shifts WHERE shift_id = $1')) {
-        return Promise.resolve({ rows: [{ start_time: '18:00:00', end_time: '20:00:00' }] });
+      if (text.includes('SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1')) {
+        return Promise.resolve({ rows: [{ start_time: '18:00:00', end_time: '20:00:00', shift_type: 'Afternoon' }] });
       }
       if (text.includes('FROM Timetable t JOIN shifts s')) {
         return Promise.resolve({
-          rows: [{ shift_id: 2, shift_name: 'Vatsa Beach Survey', start_time: '06:00:00', end_time: '08:00:00' }],
+          rows: [{ shift_id: 2, shift_name: 'Vatsa Beach Survey', start_time: '06:00:00', end_time: '08:00:00', shift_type: 'Morning' }],
         });
       }
       if (text.includes('INSERT INTO Timetable')) {
@@ -145,6 +145,58 @@ describe('POST /timetable/create rejects an overlapping shift for the same perso
 
     const res = await auth(request(app).post('/timetable/create')).send({
       user_id: 10, shift_id: 5, work_date: '2026-10-21',
+    });
+
+    expect(res.status).toBe(201);
+  });
+
+  // QA-103 (run 2): the real Morning beach-survey shifts (Loggos/Megas/Vatsa)
+  // all have start_time set but end_time NULL - a walk ends whenever it
+  // ends, not on a schedule - so the clash check above silently never fired
+  // for the one case it exists for: two Morning surveys booked at the same
+  // 06:00 start. A default per-shift_type duration now stands in for the
+  // missing end_time when comparing.
+  it('409s on two Morning surveys at the same start time even though neither shift has an end_time', async () => {
+    vi.spyOn(db, 'query').mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1')) {
+        return Promise.resolve({ rows: [{ start_time: '06:00:00', end_time: null, shift_type: 'Morning' }] });
+      }
+      if (text.includes('FROM Timetable t JOIN shifts s')) {
+        return Promise.resolve({
+          rows: [{ shift_id: 2, shift_name: 'Vatsa Beach Survey', start_time: '06:00:00', end_time: null, shift_type: 'Morning' }],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await auth(request(app).post('/timetable/create')).send({
+      user_id: 12, shift_id: 1, work_date: '2026-10-23',
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/Vatsa Beach Survey/);
+  });
+
+  it('still allows a Morning survey (no end_time) alongside a same-day Afternoon shift', async () => {
+    vi.spyOn(db, 'query').mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1')) {
+        return Promise.resolve({ rows: [{ start_time: '06:00:00', end_time: null, shift_type: 'Morning' }] });
+      }
+      if (text.includes('FROM Timetable t JOIN shifts s')) {
+        return Promise.resolve({
+          rows: [{ shift_id: 4, shift_name: 'Sandsifting', start_time: '17:00:00', end_time: '18:00:00', shift_type: 'Afternoon' }],
+        });
+      }
+      if (text.includes('INSERT INTO Timetable')) {
+        return Promise.resolve({ rows: [{ assignment_id: 2, user_id: 12, shift_id: 1, work_date: '2026-10-23' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await auth(request(app).post('/timetable/create')).send({
+      user_id: 12, shift_id: 1, work_date: '2026-10-23',
     });
 
     expect(res.status).toBe(201);

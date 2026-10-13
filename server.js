@@ -5013,6 +5013,24 @@ const timeToMinutes = (t) => {
   const [h, m] = String(t).split(':').map(Number);
   return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
 };
+
+// QA-103 (run 2): the three real beach-survey shifts in this deployment have
+// start_time set but no end_time - a morning walk ends whenever it ends, not
+// on a schedule - so the check above silently never fired for exactly the
+// case it was written for (two Morning surveys, same start, no end). A
+// typical duration per shift_type stands in only when end_time is missing,
+// so two surveys starting together still clash, while a real same-day
+// Morning-then-Afternoon combination still does not.
+const DEFAULT_SHIFT_DURATION_MINUTES = { Morning: 180, Afternoon: 60, Night: 240 };
+const effectiveShiftEnd = (startTime, endTime, shiftType) => {
+  if (endTime) return endTime;
+  const start = timeToMinutes(startTime);
+  if (start === null) return null;
+  const duration = DEFAULT_SHIFT_DURATION_MINUTES[shiftType] ?? 60;
+  const end = (start + duration) % (24 * 60);
+  return `${String(Math.floor(end / 60)).padStart(2, "0")}:${String(end % 60).padStart(2, "0")}:00`;
+};
+
 const shiftsOverlap = (aStart, aEnd, bStart, bEnd) => {
   let as = timeToMinutes(aStart), ae = timeToMinutes(aEnd);
   let bs = timeToMinutes(bStart), be = timeToMinutes(bEnd);
@@ -5032,9 +5050,9 @@ app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res)
 
   try {
     const [newShift, thatDay] = await Promise.all([
-      db.query(`SELECT start_time, end_time FROM shifts WHERE shift_id = $1;`, [shift_id]),
+      db.query(`SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1;`, [shift_id]),
       db.query(
-        `SELECT s.shift_id, s.shift_name, s.start_time, s.end_time
+        `SELECT s.shift_id, s.shift_name, s.start_time, s.end_time, s.shift_type
          FROM Timetable t JOIN shifts s ON s.shift_id = t.shift_id
          WHERE t.user_id = $1 AND t.work_date = $2;`,
         [user_id, work_date]
@@ -5042,12 +5060,15 @@ app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res)
     ]);
     const ns = newShift.rows[0];
     if (ns) {
+      const nsEnd = effectiveShiftEnd(ns.start_time, ns.end_time, ns.shift_type);
       const clash = thatDay.rows.find(
-        (r) => r.shift_id !== shift_id && shiftsOverlap(ns.start_time, ns.end_time, r.start_time, r.end_time)
+        (r) =>
+          r.shift_id !== shift_id &&
+          shiftsOverlap(ns.start_time, nsEnd, r.start_time, effectiveShiftEnd(r.start_time, r.end_time, r.shift_type))
       );
       if (clash) {
         return res.status(409).json({
-          error: `This person is already booked on "${clash.shift_name}" (${clash.start_time}-${clash.end_time}) that day, which overlaps this shift.`,
+          error: `This person is already booked on "${clash.shift_name}" (${clash.start_time}-${clash.end_time || "open-ended"}) that day, which overlaps this shift.`,
         });
       }
     }
