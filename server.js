@@ -2905,6 +2905,58 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
   }
 });
 
+// QA-047: once a sighting was submitted - a duplicate, the wrong turtle, a
+// mis-keyed measurement - there was no way to remove it; the only "fix" was
+// submitting more events on top, which just added to the pile. A Coordinator
+// or Field Leader can now delete one directly. Deleting the turtle's most
+// recent sighting also leaves its profile (scl/ccl/tags/etc, pushed there by
+// applyApprovalSideEffects) stamped with the deleted event's numbers, so this
+// re-derives the profile from whatever sighting is now most recent - the same
+// side effect a normal approval would have applied, just run again.
+app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await db.query(
+      `SELECT id, turtle_id, event_type, event_date FROM turtle_survey_events WHERE id = $1 LIMIT 1;`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Survey event not found." });
+    }
+    const { turtle_id } = existing.rows[0];
+
+    const deleted = await db.query(
+      `DELETE FROM turtle_survey_events WHERE id = $1 RETURNING *;`,
+      [id]
+    );
+    if (deleted.rowCount === 0) {
+      return res.status(404).json({ error: "Survey event not found." });
+    }
+
+    // A deleted record leaves nothing for its review row to point at.
+    await db.query(
+      `DELETE FROM record_reviews WHERE record_type = 'turtle_survey_event' AND record_id = $1;`,
+      [id]
+    );
+
+    await applyApprovalSideEffects("turtle", turtle_id, req);
+
+    await recordAudit(db, {
+      recordType: "turtle_survey_event",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: `${deleted.rows[0].event_type || "Encounter"} of turtle ${turtle_id}`,
+    });
+
+    res.json({ message: "Survey event deleted successfully", deleted_event: deleted.rows[0] });
+  } catch (err) {
+    console.error("Delete turtle survey event error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 // Update turtle tags + measurements + health condition endpoint.
 //
 // Records/TurtleDetails hide the Edit button for a Field Volunteer, so the
