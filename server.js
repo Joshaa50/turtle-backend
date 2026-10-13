@@ -316,25 +316,28 @@ const invalidNest = (body) => {
 const isExcavationType = (t) => String(t || "").toUpperCase().includes("INVENTORY");
 const isEmergenceType = (t) => ["EMERGENCE", "HATCHING"].includes(String(t || "").toUpperCase());
 
-// Earliest a hatchling track is plausible, counted from the nest's date_found.
-// Mirrors DUE_TO_HATCH_DAYS in the frontend's lib/nestLifecycle.ts (loggerhead
-// incubation on Kefalonia runs ~45-70 days) - that is the only existing
-// incubation-duration constant in the codebase, so it is reused rather than
-// guessed at again here. A hatchling track logged before this many days have
-// elapsed is not a legitimate early anomaly; it is almost always the wrong
-// nest code, the wrong event type, or a mistyped date - and must be caught
-// before it can flip a nest to "hatching" or inflate the hatchling counts in
+// Earliest a hatchling track - or a final/partial inventory - is plausible,
+// counted from the nest's date_found. Mirrors DUE_TO_HATCH_DAYS in the
+// frontend's lib/nestLifecycle.ts (loggerhead incubation on Kefalonia runs
+// ~45-70 days) - that is the only existing incubation-duration constant in
+// the codebase, so it is reused rather than guessed at again here. Either
+// kind of event logged before this many days have elapsed is not a
+// legitimate early anomaly; it is almost always the wrong nest code, the
+// wrong event type, or a mistyped date - and must be caught before it can
+// flip a nest to "hatching"/"hatched" or inflate the hatchling counts in
 // /public/stats and the season report, both of which sum every EMERGENCE/
-// HATCHING row unconditionally (QA-092).
+// HATCHING/inventory row unconditionally (QA-092, QA-106).
 const MIN_DAYS_BEFORE_HATCHLING_TRACK = 45;
 
 const hatchlingTrackTooEarlyError = (eventType, nestDateFound, asOf = new Date()) => {
-  if (!isEmergenceType(eventType) || !nestDateFound) return null;
+  const isExcavation = isExcavationType(eventType);
+  if ((!isEmergenceType(eventType) && !isExcavation) || !nestDateFound) return null;
   const laid = new Date(nestDateFound);
   if (Number.isNaN(laid.valueOf())) return null;
   const days = Math.floor((asOf.getTime() - laid.getTime()) / 86400000);
   if (days < MIN_DAYS_BEFORE_HATCHLING_TRACK) {
-    return `A hatchling track ${days} day${days === 1 ? "" : "s"} after this nest was laid is not plausible ` +
+    const subject = isExcavation ? "An inventory" : "A hatchling track";
+    return `${subject} ${days} day${days === 1 ? "" : "s"} after this nest was laid is not plausible ` +
       `(loggerhead incubation runs at least ${MIN_DAYS_BEFORE_HATCHLING_TRACK} days) - ` +
       `did you mean to log something else, or is this the wrong nest?`;
   }
@@ -2725,8 +2728,11 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
     const row = ev.rows[0];
     if (!row || row.nest_id == null) return;
 
-    if (isEmergenceType(row.event_type) && hatchlingTrackTooEarlyError(row.event_type, row.date_found, row.created_at)) {
-      console.error(`Skipping hatching transition for nest_event ${recordId}: hatchling track logged too soon after laid_date.`);
+    if (
+      (isEmergenceType(row.event_type) || isExcavationType(row.event_type)) &&
+      hatchlingTrackTooEarlyError(row.event_type, row.date_found, row.created_at)
+    ) {
+      console.error(`Skipping status transition for nest_event ${recordId}: event logged too soon after laid_date.`);
       return;
     }
 
