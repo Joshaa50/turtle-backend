@@ -1,10 +1,15 @@
 // Three bugs found in the 2026-10-13 nightly QA run.
-import { describe, it, expect, vi, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import server from '../server.js';
+import { stubTxClient } from './support/txClient.js';
 
 const { app, db } = server;
+
+beforeEach(() => {
+  stubTxClient(db);
+});
 const SECRET = process.env.JWT_SECRET;
 
 const leaderToken = jwt.sign(

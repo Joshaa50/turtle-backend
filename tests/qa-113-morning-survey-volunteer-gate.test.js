@@ -103,4 +103,11 @@ describe('PATCH /morning-surveys/:id — Field Volunteer gate (QA-113)', () => {
     expect(res.status).toBe(200);
     expect(wasUpdated()).toBe(true);
   });
+
+  it('applies the same gate to a Field Assistant (not just a volunteer)', async () => {
+    gateRow = { id: 35, status: 'approved', submitted_by: '12' };
+    const res = await patch(tokenFor('Field Assistant', '12'));
+    expect(res.status).toBe(403);
+    expect(wasUpdated()).toBe(false);
+  });
 });

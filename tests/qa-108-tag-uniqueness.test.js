@@ -61,7 +61,7 @@ beforeEach(() => {
 
 afterAll(() => db.end().catch(() => {}));
 
-const insertCalls = () => query.mock.calls.filter(([sql]) => /INSERT INTO turtles/i.test(sql));
+const insertCalls = () => clientQuery.mock.calls.filter(([sql]) => /INSERT INTO turtles/i.test(sql));
 
 describe('POST /turtles/create — tag already on an active turtle (QA-108)', () => {
   it('refuses a front-left tag held by an active turtle with 409 and the form wording', async () => {
@@ -86,7 +86,7 @@ describe('POST /turtles/create — tag already on an active turtle (QA-108)', ()
   it('checks every tag position and the KF- prefix as stored', async () => {
     await auth(request(app).post('/turtles/create')).send({ ...validTurtle, front_left_tag: 'KF-1234', rear_left_tag: 'KF-77' });
 
-    const lookup = query.mock.calls.find(([sql]) => isTagLookup(sql));
+    const lookup = clientQuery.mock.calls.find(([sql]) => isTagLookup(sql));
     expect(lookup[1][0]).toEqual(['KF-1234', 'KF-77']);
   });
 
@@ -101,7 +101,7 @@ describe('POST /turtles/create — tag already on an active turtle (QA-108)', ()
   it('only looks at active turtles, so an archived holder cannot block the tag', async () => {
     await auth(request(app).post('/turtles/create')).send({ ...validTurtle, front_left_tag: 'KF-1234' });
 
-    const lookup = query.mock.calls.find(([sql]) => isTagLookup(sql));
+    const lookup = clientQuery.mock.calls.find(([sql]) => isTagLookup(sql));
     expect(lookup[0]).toMatch(/is_archived = FALSE/);
   });
 });

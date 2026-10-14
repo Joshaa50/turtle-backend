@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import server from '../server.js';
+import { stubTxClient } from './support/txClient.js';
 
 const { app, db } = server;
 const SECRET = process.env.JWT_SECRET;
@@ -36,6 +37,7 @@ const review = (over = {}) => ({
 });
 
 beforeEach(() => {
+  stubTxClient(db);
   stored = {};
   reviewRows = [];
   existingTurtle = { species: 'Legacy free text', health_condition: 'Deceased' };

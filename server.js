@@ -1882,9 +1882,18 @@ const insertTurtle = async (executor, body) => {
 
 // Create Turtle endpoint
 app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
+  const client = await db.connect();
   try {
-    const { error, conflict, row } = await insertTurtle(db, req.body);
-    if (error) return res.status(conflict ? 409 : 400).json({ error });
+    // Same serialisation as create-with-event (QA-108): the tag check and the
+    // insert happen under one lock, so two saves can't both claim a tag.
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('turtles_tag_assignment'))");
+    const { error, conflict, row } = await insertTurtle(client, req.body);
+    if (error) {
+      await client.query("ROLLBACK");
+      return res.status(conflict ? 409 : 400).json({ error });
+    }
+    await client.query("COMMIT");
 
     const review = await queueReviewSafely("turtle", row.id, req);
     await recordAudit(db, { recordType: "turtle", recordId: row.id, action: "created", req,
@@ -1896,8 +1905,11 @@ app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
       review
     });
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     console.error("Create turtle error:", err);
     res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
   }
 });
 
@@ -2960,7 +2972,7 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
 // applyApprovalSideEffects) stamped with the deleted event's numbers, so this
 // re-derives the profile from whatever sighting is now most recent - the same
 // side effect a normal approval would have applied, just run again.
-app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3092,10 +3104,9 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
     // re-filing of the turtle's identity. A flipper tag that wasn't checked
     // comes through as a blank field here - COALESCE keeps the previously
     // recorded value rather than erasing it, the same way name/species/sex
-    // already do below. Measurements are the one thing this route exists to
-    // overwrite, so those stay a plain replace.
-    // A blank measurement or identity field means "not provided" on a
-    // re-sighting, so it keeps the stored value rather than erasing it.
+    // already do below. A blank measurement or identity field means "not
+    // provided" on a re-sighting, so it keeps the stored value rather than
+    // erasing it (QA-114).
     const notBlank = (v) => (v === undefined || v === null || (typeof v === "string" && v.trim() === "") ? null : v);
 
     const sql = `
@@ -3115,13 +3126,13 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
         rear_right_tag = COALESCE(NULLIF($8, ''), rear_right_tag),
         rear_right_address = COALESCE(NULLIF($9, ''), rear_right_address),
 
-        scl_max = $10,
-        scl_min = $11,
-        scw = $12,
+        scl_max = COALESCE($10, scl_max),
+        scl_min = COALESCE($11, scl_min),
+        scw = COALESCE($12, scw),
 
-        ccl_max = $13,
-        ccl_min = $14,
-        ccw = $15,
+        ccl_max = COALESCE($13, ccl_max),
+        ccl_min = COALESCE($14, ccl_min),
+        ccw = COALESCE($15, ccw),
 
         tail_extension = COALESCE($16, tail_extension),
         vent_to_tail_tip = COALESCE($17, vent_to_tail_tip),
@@ -3151,13 +3162,13 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       rear_right_tag || '',
       rear_right_address || '',
 
-      scl_max ?? null,
-      scl_min ?? null,
-      scw ?? null,
+      notBlank(scl_max),
+      notBlank(scl_min),
+      notBlank(scw),
 
-      ccl_max ?? null,
-      ccl_min ?? null,
-      ccw ?? null,
+      notBlank(ccl_max),
+      notBlank(ccl_min),
+      notBlank(ccw),
 
       notBlank(tail_extension),
       notBlank(vent_to_tail_tip),
@@ -6013,14 +6024,15 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
     const { id } = req.params;
     const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes, start_time, end_time } = req.body;
 
-    // A Field Volunteer may correct a survey only while it is sent back for
-    // correction: their own survey, and its review row currently 'rejected'.
+    // A Field Volunteer or Field Assistant may correct a survey only while it
+    // is sent back for correction: their own survey, and its review row
+    // currently 'rejected'.
     // Ownership comes from record_reviews.submitted_by, the same column the
     // review queue's resubmit route trusts - status and submitter sit on one
     // row, and recordAudit can silently fail to write the 'created' entry that
     // isOwnRecord relies on. No review row at all means no volunteer access.
-    // Field Leaders, Coordinators and Field Assistants are not gated here.
-    if (req.user.role === VOLUNTEER) {
+    // Field Leaders and Coordinators are not gated here.
+    if (req.user.role === VOLUNTEER || req.user.role === "Field Assistant") {
       const gate = await db.query(
         `SELECT ms.id, r.status, r.submitted_by
          FROM morning_surveys ms

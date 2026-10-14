@@ -1,8 +1,8 @@
 // QA-047: a wrongly-submitted turtle sighting (duplicate, wrong turtle,
 // mis-keyed measurement) could never be removed, so QA/test debris that got
 // typed against a real turtle just kept piling up and was visible to anyone
-// trying the demo. This pins the new DELETE /turtle_survey_events/:id, used
-// by a Coordinator or Field Leader, and that deleting the turtle's most
+// trying the demo. This pins the new DELETE /turtle_survey_events/:id, which
+// only a Coordinator may use (Field Leaders are refused), and that deleting the turtle's most
 // recent sighting re-derives its profile from whatever sighting is now
 // most recent instead of leaving it stamped with the deleted numbers.
 import { describe, it, expect, vi, afterAll } from 'vitest';
@@ -13,8 +13,8 @@ import server from '../server.js';
 const { app, db } = server;
 const SECRET = process.env.JWT_SECRET;
 
-const leaderToken = jwt.sign(
-  { sub: '49', role: 'Field Leader', email: 'elena.papadaki@turtleguard.demo' },
+const coordinatorToken = jwt.sign(
+  { sub: '49', role: 'Project Coordinator', email: 'sofia.manthou@turtleguard.demo' },
   SECRET,
   { expiresIn: '1h' },
 );
@@ -23,7 +23,12 @@ const volunteerToken = jwt.sign(
   SECRET,
   { expiresIn: '1h' },
 );
-const auth = (req) => req.set('Authorization', `Bearer ${leaderToken}`);
+const auth = (req) => req.set('Authorization', `Bearer ${coordinatorToken}`);
+const leaderToken = jwt.sign(
+  { sub: '49', role: 'Field Leader', email: 'elena.papadaki@turtleguard.demo' },
+  SECRET,
+  { expiresIn: '1h' },
+);
 
 afterAll(() => db.end().catch(() => {}));
 
@@ -81,6 +86,12 @@ describe('DELETE /turtle_survey_events/:id (QA-047)', () => {
     const res = await request(app)
       .delete('/turtle_survey_events/73')
       .set('Authorization', `Bearer ${volunteerToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a Field Leader - deletes are coordinator-only', async () => {
+    const res = await request(app).delete('/turtle_survey_events/57')
+      .set('Authorization', `Bearer ${leaderToken}`);
     expect(res.status).toBe(403);
   });
 });

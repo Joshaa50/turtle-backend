@@ -121,7 +121,7 @@ describe('defaults match current API behaviour', () => {
     });
     expect(res.status).toBe(200);
 
-    const insertCall = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO turtles'));
+    const insertCall = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO turtles'));
     expect(insertCall).toBeTruthy();
     const [, insertParams] = insertCall;
     // tail_extension, vent_to_tail_tip, total_tail_length are the 19th-21st bound params.
