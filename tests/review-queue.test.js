@@ -197,6 +197,52 @@ describe('deciding on a submission', () => {
   });
 });
 
+describe('bulk-approving several reviews at once (QA-034)', () => {
+  it('lets a Field Leader approve several in one request', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('UPDATE record_reviews')) {
+        return Promise.resolve({ rows: [{ id: 5 }, { id: 6 }, { id: 7 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6, 7] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviews).toBeDefined();
+    expect(res.body.skippedIds).toEqual([]);
+  });
+
+  it('refuses a volunteer', async () => {
+    const res = await asVolunteer(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6] });
+
+    expect(res.status).toBe(403);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE record_reviews'), expect.anything());
+  });
+
+  it('rejects an empty id list instead of updating everything', async () => {
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [] });
+
+    expect(res.status).toBe(400);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE record_reviews'), expect.anything());
+  });
+
+  it('reports ids already decided by someone else rather than failing the whole batch', async () => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      // Only 5 and 7 are still pending; 6 was already approved by someone else.
+      if (text.includes('UPDATE record_reviews')) return Promise.resolve({ rows: [{ id: 5 }, { id: 7 }] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asLeader(request(app).post('/reviews/bulk-approve')).send({ ids: [5, 6, 7] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.skippedIds).toEqual([6]);
+  });
+});
+
 describe('resubmitting a rejected submission', () => {
   it('lets the submitter put their own rejected record back in the queue', async () => {
     const res = await asVolunteer(request(app).post('/reviews/5/resubmit')).send({});
@@ -299,6 +345,82 @@ describe('cleaning up orphaned review rows', () => {
 
     expect(res.status).toBe(200);
     expect(wroteReviewCascade(clientQuery, 'emergence')).toBe(true);
+  });
+});
+
+describe('describing a hatchling-track nest_event (QA-072)', () => {
+  // A nest_event's label used to be the raw event_type column ("EMERGENCE"),
+  // and its kind the static "Nest event" - unhelpful to a reviewer. These pin
+  // down the friendlier kind/label describeReviewedRecords now derives from
+  // the event's own nest_code/tracks_to_sea/tracks_lost columns.
+  const reviewRow = (over = {}) => ({
+    id: 5, record_type: 'nest_event', record_id: 11, status: 'pending',
+    submitted_by: 51, submitted_at: '2026-06-01T05:00:00Z',
+    reviewed_by: null, reviewed_at: null, review_note: null, ...over,
+  });
+
+  const mockFor = (nestEventRow) => {
+    query.mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('FROM record_reviews r')) return Promise.resolve({ rows: [reviewRow()] });
+      if (text.includes('FROM turtle_nest_events') && text.includes('AS kind')) {
+        return Promise.resolve({ rows: [{ id: 11, ...nestEventRow }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  };
+
+  it('labels an EMERGENCE event with the nest code and track counts', async () => {
+    mockFor({ label: 'VR-1R (23 to sea, 2 lost)', kind: 'Hatchling tracks' });
+
+    const res = await asLeader(request(app).get('/reviews'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviews[0]).toMatchObject({
+      record_kind: 'Hatchling tracks',
+      record_label: 'VR-1R (23 to sea, 2 lost)',
+    });
+  });
+
+  it('renders zero track counts rather than nulls', async () => {
+    mockFor({ label: 'VR-1R (0 to sea, 0 lost)', kind: 'Hatchling tracks' });
+
+    const res = await asLeader(request(app).get('/reviews'));
+
+    expect(res.body.reviews[0].record_label).toBe('VR-1R (0 to sea, 0 lost)');
+  });
+
+  it('falls back to "?" for a missing nest code', async () => {
+    mockFor({ label: '? (23 to sea, 2 lost)', kind: 'Hatchling tracks' });
+
+    const res = await asLeader(request(app).get('/reviews'));
+
+    expect(res.body.reviews[0].record_label).toBe('? (23 to sea, 2 lost)');
+  });
+
+  it('gives a non-emergence nest_event (e.g. INVENTORY) a sensible kind/label too', async () => {
+    mockFor({ label: 'LG2-9', kind: 'Inventory' });
+
+    const res = await asLeader(request(app).get('/reviews'));
+
+    expect(res.body.reviews[0]).toMatchObject({ record_kind: 'Inventory', record_label: 'LG2-9' });
+  });
+
+  it('builds the nest_event label from nest_code/tracks_to_sea/tracks_lost, not the raw event_type', async () => {
+    mockFor({ label: 'VR-1R (23 to sea, 2 lost)', kind: 'Hatchling tracks' });
+
+    await asLeader(request(app).get('/reviews'));
+
+    const call = query.mock.calls.find(
+      ([sql]) => String(sql).includes('FROM turtle_nest_events') && String(sql).includes('AS kind'),
+    );
+    expect(call).toBeDefined();
+    const sql = String(call[0]);
+    // Guards against regressing back to selecting the raw event_type column.
+    expect(sql).not.toMatch(/SELECT id, event_type AS label/);
+    expect(sql).toContain("COALESCE(nest_code, '?')");
+    expect(sql).toContain('tracks_to_sea');
+    expect(sql).toContain('tracks_lost');
   });
 });
 

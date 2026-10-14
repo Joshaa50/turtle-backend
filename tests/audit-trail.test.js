@@ -117,7 +117,13 @@ describe('audit trail', () => {
           health_condition: 'Healthy', observer: 'E. Papadaki',
         });
 
-      const call = auditInsert();
+      // QA-091: a Field Leader needs no review for "turtle", so this save
+      // also fires the immediate profile-update side effect, which writes
+      // its own ("turtle", "updated") audit row - find the encounter's own
+      // row by its record type rather than assuming it's the first write.
+      const call = query.mock.calls.find(
+        ([sql, params]) => /INSERT INTO record_audit/i.test(sql) && params?.[0] === 'turtle_survey_event'
+      );
       expect(call, 'expected an audit row for the encounter').toBeTruthy();
       expect(call[1][0]).toBe('turtle_survey_event');
       expect(call[1][2]).toBe('created');

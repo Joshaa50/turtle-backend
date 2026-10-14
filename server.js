@@ -13,6 +13,8 @@ types.setTypeParser(types.builtins.DATE, (val) => val);
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
+const path = require("node:path");
 
 const app = express();
 
@@ -270,6 +272,22 @@ const minExceedsMaxError = (body) => {
   return null;
 };
 
+// The straight-line carapace length (SCL) can never exceed the length
+// measured along the shell's curve (CCL) - the curved path over a dome is
+// always at least as long as the straight line under it, for every species.
+// SCL > CCL is not an unusual turtle, it is two fields swapped or a
+// misread tape - QA-102.
+const sclExceedsCclError = (body) => {
+  for (const [sclKey, cclKey, label] of [["scl_max", "ccl_max", "MAX"], ["scl_min", "ccl_min", "MIN"]]) {
+    const scl = asNumber(body[sclKey]);
+    const ccl = asNumber(body[cclKey]);
+    if (scl !== null && ccl !== null && scl > ccl) {
+      return `SCL ${label} (${scl}) cannot be greater than CCL ${label} (${ccl}) - curved length is always at least straight length.`;
+    }
+  }
+  return null;
+};
+
 // Range plus the two things a nest cannot be regardless of range: more eggs left
 // than were ever laid, and a chamber floor above its ceiling.
 const invalidNest = (body) => {
@@ -297,6 +315,34 @@ const invalidNest = (body) => {
 // logs add up across nights, so the running total is compared, not one night.
 const isExcavationType = (t) => String(t || "").toUpperCase().includes("INVENTORY");
 const isEmergenceType = (t) => ["EMERGENCE", "HATCHING"].includes(String(t || "").toUpperCase());
+
+// Earliest a hatchling track - or a final/partial inventory - is plausible,
+// counted from the nest's date_found. Mirrors DUE_TO_HATCH_DAYS in the
+// frontend's lib/nestLifecycle.ts (loggerhead incubation on Kefalonia runs
+// ~45-70 days) - that is the only existing incubation-duration constant in
+// the codebase, so it is reused rather than guessed at again here. Either
+// kind of event logged before this many days have elapsed is not a
+// legitimate early anomaly; it is almost always the wrong nest code, the
+// wrong event type, or a mistyped date - and must be caught before it can
+// flip a nest to "hatching"/"hatched" or inflate the hatchling counts in
+// /public/stats and the season report, both of which sum every EMERGENCE/
+// HATCHING/inventory row unconditionally (QA-092, QA-106).
+const MIN_DAYS_BEFORE_HATCHLING_TRACK = 45;
+
+const hatchlingTrackTooEarlyError = (eventType, nestDateFound, asOf = new Date()) => {
+  const isExcavation = isExcavationType(eventType);
+  if ((!isEmergenceType(eventType) && !isExcavation) || !nestDateFound) return null;
+  const laid = new Date(nestDateFound);
+  if (Number.isNaN(laid.valueOf())) return null;
+  const days = Math.floor((asOf.getTime() - laid.getTime()) / 86400000);
+  if (days < MIN_DAYS_BEFORE_HATCHLING_TRACK) {
+    const subject = isExcavation ? "An inventory" : "A hatchling track";
+    return `${subject} ${days} day${days === 1 ? "" : "s"} after this nest was laid is not plausible ` +
+      `(loggerhead incubation runs at least ${MIN_DAYS_BEFORE_HATCHLING_TRACK} days) - ` +
+      `did you mean to log something else, or is this the wrong nest?`;
+  }
+  return null;
+};
 
 const hatchlingsExceedClutch = (body, nestTotalEggs, emergedElsewhere) => {
   const clutch = asNumber(nestTotalEggs) > 0 ? asNumber(nestTotalEggs) : asNumber(body.total_eggs);
@@ -454,7 +500,28 @@ const isOwnRecord = async (recordType, recordId, userId) => {
 const REVIEWABLE = {
   nest: { table: "turtle_nests", label: "Nest", describe: "nest_code" },
   turtle: { table: "turtles", label: "Turtle", describe: "name" },
-  nest_event: { table: "turtle_nest_events", label: "Nest event", describe: "event_type" },
+  // event_type is a raw code (e.g. "EMERGENCE"); describeKind/describe turn it
+  // and the event's own columns into the same phrasing describeNestEvent uses
+  // for audit summaries, so a reviewer sees "Hatchling tracks · VR-1R (23 to
+  // sea, 2 lost)" instead of "Nest event · EMERGENCE".
+  nest_event: {
+    table: "turtle_nest_events",
+    label: "Nest event",
+    describeKind: `CASE
+      WHEN UPPER(event_type) IN ('EMERGENCE', 'HATCHING') THEN 'Hatchling tracks'
+      WHEN event_type = 'PARTIAL_INVENTORY' THEN 'Partial inventory'
+      WHEN UPPER(event_type) LIKE '%INVENTORY%' THEN 'Inventory'
+      WHEN event_type = 'TOP_EGG' THEN 'Top egg check'
+      ELSE 'Nest event'
+    END`,
+    describe: `CASE
+      WHEN UPPER(event_type) IN ('EMERGENCE', 'HATCHING')
+        THEN COALESCE(nest_code, '?') || ' (' || COALESCE(tracks_to_sea, 0) || ' to sea, ' || COALESCE(tracks_lost, 0) || ' lost)'
+      WHEN event_type = 'PARTIAL_INVENTORY' OR UPPER(event_type) LIKE '%INVENTORY%' OR event_type = 'TOP_EGG'
+        THEN COALESCE(nest_code, '?')
+      ELSE COALESCE(nest_code, UPPER(event_type))
+    END`,
+  },
   emergence: { table: "turtle_emergences", label: "Emergence", describe: "beach" },
   // morning_surveys stores beach_id, not a beach name, so its label is looked up.
   morning_survey: { table: "morning_surveys", label: "Morning survey", describe: "(SELECT name FROM beaches WHERE beaches.id = beach_id)" },
@@ -696,26 +763,41 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
       SELECT
         id, first_name, last_name, email, role, station,
         is_active, is_email_verified, is_password_reset_needed,
-        created_at, profile_picture
+        created_at, (profile_picture IS NOT NULL) AS has_profile_picture
       FROM users
       ORDER BY station ASC, last_name ASC;
     `;
 
     const result = await db.query(sql);
 
-    const users = result.rows.map(user => ({
-      ...user,
-      profile_picture: user.profile_picture
-        ? user.profile_picture.toString("base64")
-        : null
-    }));
-
     res.json({
       message: "Users fetched successfully",
-      users
+      users: result.rows
     });
   } catch (err) {
     console.error("Get users error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// A names-only directory for the Observer picker on Tag a Turtle / Record
+// Inventory. Those forms used to call GET /users for this, which worked
+// until that route was tightened to Coordinator/Field Leader only (QA-002) -
+// after that a Field Assistant's own Observer dropdown came back empty and
+// the record couldn't be saved at all (QA-043). This carries none of the
+// directory's sensitive fields (email, active/verification flags, etc.), so
+// any recording role can call it.
+app.get("/users/observers", requireRole(...RECORDERS), async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, first_name, last_name, role, station, is_active
+       FROM users
+       WHERE is_active = true
+       ORDER BY station ASC, last_name ASC;`
+    );
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error("Get observers error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -729,6 +811,12 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
 app.get("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
+
+    // QA-060: a non-numeric id (e.g. "abc") reached the query as-is, which
+    // Postgres rejects with an invalid-integer-input error - caught by the
+    // generic handler below as an opaque 500. Same guard already used by
+    // the neighbouring /users/:id/data-export route.
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
 
     if (String(req.user?.id) !== String(id) && req.user?.role !== COORDINATOR) {
       return res.status(403).json({ error: "You do not have permission to do that." });
@@ -1017,14 +1105,6 @@ app.patch("/users/:id", async (req, res) => {
 
   if (!isPrivileged && !isSelf) {
     return res.status(403).json({ error: "You can only edit your own profile." });
-  }
-
-  // An anonymous visitor who clicked the public Coordinator/Field Leader demo
-  // button reaches this route with a real token at a real privileged role -
-  // but they never proved who they are, so they must not be able to reset,
-  // deactivate, erase or promote anyone else's actual account.
-  if (req.user.demo && isPrivileged && !isSelf) {
-    return res.status(403).json({ error: "Demo accounts cannot change other people's accounts." });
   }
 
   // Only a coordinator may create or change another coordinator, so a field
@@ -1529,13 +1609,6 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
   const { id } = req.params;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
 
-  // Irreversible, and confirmable just by typing an email address already
-  // visible in the list - an anonymous demo visitor must not be able to run
-  // this against anyone, including another demo account.
-  if (req.user.demo) {
-    return res.status(403).json({ error: "Demo accounts cannot erase anyone's account." });
-  }
-
   // Typing the address is the confirmation, the way deleting your own account
   // asks for a password. This cannot be undone and it is easy to run against
   // the wrong row in a list of forty-odd people.
@@ -1585,6 +1658,100 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     if (client) await client.query("ROLLBACK").catch(() => {});
     console.error("Erase user error:", err);
     res.status(500).json({ error: "Server error while erasing. Nothing was changed." });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Reset demo data
+//--------------------------------------------------------------
+// Wipes every activity/record table back to empty and deletes every user
+// except the 4 @turtleguard.demo personas the demo buttons sign in as, then
+// kicks off a reseed in the background so the site comes back populated with
+// fresh, realistic data. Site configuration (beaches, shift types, settings
+// in app_settings) is deliberately NOT touched - it is structural config,
+// not accumulated demo mess.
+//
+// Deliberately NOT gated on req.user.demo - the owner's reset script logs in
+// as the demo Coordinator to call this too, and demo accounts otherwise
+// behave exactly like real ones everywhere in this app now; the frontend
+// hides this button from a demo Coordinator's own UI instead.
+app.post("/admin/reset-demo-data", requireRole(COORDINATOR), async (req, res) => {
+  const { confirm } = req.body || {};
+  if (confirm !== "RESET DEMO DATA") {
+    return res.status(400).json({ error: 'Confirm by sending confirm: "RESET DEMO DATA".' });
+  }
+
+  let client;
+  try {
+    client = await db.connect();
+    await client.query("BEGIN");
+
+    const counts = {};
+    const wipe = async (table) => {
+      const r = await client.query(`DELETE FROM ${table};`);
+      counts[table] = r.rowCount;
+    };
+
+    await wipe("nest_photos");
+    await wipe("turtle_nest_events");
+    await wipe("turtle_survey_events");
+    await wipe("morning_survey_nests");
+    await wipe("morning_survey_emergences");
+    await wipe("morning_surveys");
+    await wipe("record_reviews");
+    await wipe("record_audit");
+    await wipe("turtle_nests");
+    await wipe("turtle_emergences");
+    await wipe("turtles");
+    await wipe("Timetable");
+    await wipe("roster_template_rows");
+    await wipe("roster_templates");
+
+    const usersDeleted = await client.query(
+      `DELETE FROM users WHERE email NOT LIKE '%@turtleguard.demo';`
+    );
+    counts.users = usersDeleted.rowCount;
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Demo data wiped. Regenerating fresh data in the background - this can take about a minute; refresh shortly.",
+      deleted: counts,
+    });
+
+    // Reseed AFTER responding, so the HTTP request doesn't block on however
+    // long seeding takes (it makes many sequential API calls to itself and
+    // could exceed a typical request timeout). Never spawn real processes
+    // under the test suite - tests stub db.query/db.connect, not a live
+    // server for these scripts to actually call.
+    if (process.env.NODE_ENV === "test") return;
+    const scriptsDir = path.join(__dirname, "scripts");
+    const selfUrl = `http://127.0.0.1:${process.env.PORT || 3000}`;
+    const runScript = (name) => new Promise((resolve) => {
+      const child = spawn("node", [name, "--confirm"], {
+        cwd: scriptsDir,
+        env: { ...process.env, VITE_API_URL: selfUrl, API_URL: selfUrl },
+        stdio: "inherit",
+      });
+      child.on("exit", (code) => {
+        if (code !== 0) console.error(`Reseed step ${name} exited with code ${code}`);
+        resolve();
+      });
+      child.on("error", (err) => {
+        console.error(`Reseed step ${name} failed to start:`, err.message);
+        resolve();
+      });
+    });
+    (async () => {
+      await runScript("qa-seed.mjs");
+      await runScript("demo-seed-activity.mjs");
+      console.log("Demo data reseed complete.");
+    })();
+  } catch (err) {
+    if (client) await client.query("ROLLBACK").catch(() => {});
+    console.error("Reset demo data error:", err);
+    res.status(500).json({ error: "Server error while resetting. Nothing was changed." });
   } finally {
     if (client) client.release();
   }
@@ -1665,6 +1832,9 @@ const insertTurtle = async (executor, body) => {
 
   const measurementErr = minExceedsMaxError(body);
   if (measurementErr) return { error: measurementErr };
+
+  const sclCclErr = sclExceedsCclError(body);
+  if (sclCclErr) return { error: sclCclErr };
 
   const notInList = await listError(body);
   if (notInList) return { error: notInList };
@@ -1751,6 +1921,78 @@ if (require.main === module) {
       console.log("turtles.is_archived is present.");
     } catch (err) {
       console.error("Could not ensure turtles.is_archived:", err.message);
+    }
+  })();
+}
+
+// QA-063: the app layer already treats the three tail measurements as
+// "recommended" (FORM_FIELD_SCHEMA.turtle.tail_measurements, insertTurtle,
+// insertTurtleSurveyEvent), but the live table was never altered to match -
+// a NOT NULL left over from before that change still rejected a save with
+// any of the three blank. Same boot-time, idempotent pattern as
+// turtles.is_archived above.
+// QA-072: a hatchling track logged mid-walk (via /nest-events/create) is
+// created before the morning survey row that will carry it exists, so it
+// cannot be folded into the survey's review at creation time the way linked
+// nests/emergences are. survey_id lets the frontend pass that link once the
+// survey row has been created; see foldIntoSurveyReview below. Plain
+// INTEGER, no FK - every cross-table id in this schema is a bare integer,
+// enforced at the app layer. Same boot-time, idempotent pattern as
+// turtles.is_archived above; no backfill, this only applies going forward.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtle_nest_events ADD COLUMN IF NOT EXISTS survey_id INTEGER;`);
+      await db.query(`CREATE INDEX IF NOT EXISTS turtle_nest_events_survey_id_idx ON turtle_nest_events (survey_id);`);
+      console.log("turtle_nest_events.survey_id is present.");
+    } catch (err) {
+      console.error("Could not ensure turtle_nest_events.survey_id:", err.message);
+    }
+  })();
+}
+
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtles ALTER COLUMN tail_extension DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtles ALTER COLUMN vent_to_tail_tip DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtles ALTER COLUMN total_tail_length DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN tail_extension DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN vent_to_tail_tip DROP NOT NULL;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN total_tail_length DROP NOT NULL;`);
+      console.log("Tail measurement columns on turtles and turtle_survey_events are nullable.");
+    } catch (err) {
+      console.error("Could not ensure tail measurement columns are nullable:", err.message);
+    }
+  })();
+}
+
+// QA-089: NIGHT_SURVEY timing fields (first seen, start of egg laying,
+// covering, camouflage, reached sea) are sent by insertTurtleSurveyEvent on
+// every create. These columns already existed on the live table as
+// "timestamp without time zone" (added outside any migration in this repo),
+// not TIME - so a bare "HH:MM" value failed to cast into a full timestamp
+// with a Postgres error that the route's generic catch flattened into a
+// bare 500. ADD COLUMN IF NOT EXISTS was a no-op against the existing
+// mistyped columns; force the type instead. No non-null data has ever been
+// successfully written to these columns (every create with a real value
+// failed), so this cast is safe.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_first_seen TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_start_egg_laying TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_covering TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_end_camouflage TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS time_reach_sea TIME;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_first_seen TYPE TIME USING time_first_seen::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_start_egg_laying TYPE TIME USING time_start_egg_laying::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_covering TYPE TIME USING time_covering::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_end_camouflage TYPE TIME USING time_end_camouflage::time;`);
+      await db.query(`ALTER TABLE turtle_survey_events ALTER COLUMN time_reach_sea TYPE TIME USING time_reach_sea::time;`);
+      console.log("turtle_survey_events time_* columns are present and typed TIME.");
+    } catch (err) {
+      console.error("Could not ensure turtle_survey_events time_* columns:", err.message);
     }
   })();
 }
@@ -2234,8 +2476,18 @@ const FORM_FIELD_SCHEMA = {
     rear_left_tag: { keys: ["rear_left_tag", "rear_left_address"], label: "Rear-left tag", default: "recommended" },
     rear_right_tag: { keys: ["rear_right_tag", "rear_right_address"], label: "Rear-right tag", default: "recommended" },
     measurements: {
-      keys: ["scl_max", "scl_min", "scw", "ccl_max", "ccl_min", "ccw", "tail_extension", "vent_to_tail_tip", "total_tail_length"],
+      keys: ["scl_max", "scl_min", "scw", "ccl_max", "ccl_min", "ccw"],
       label: "Measurements", default: "required",
+    },
+    // QA-063: these used to be bundled into "measurements" above, all-or-
+    // nothing - a turtle whose tail was damaged or who bolted before it could
+    // be measured could not be saved at all. Split out so a coordinator can
+    // require them independently of the core carapace numbers; default stays
+    // "recommended" so an unconfigured project behaves as it always should
+    // have (core measurements required, tail ones not blocking).
+    tail_measurements: {
+      keys: ["tail_extension", "vent_to_tail_tip", "total_tail_length"],
+      label: "Tail measurements", default: "recommended",
     },
   },
   morning_survey: {
@@ -2365,12 +2617,16 @@ const applyAutoApprove = async () => {
   try {
     const days = (await getReviewRules()).auto_approve_days;
     if (!days) return;
-    await db.query(
+    const result = await db.query(
       `UPDATE record_reviews
        SET status = 'approved', reviewed_by = NULL, reviewed_at = NOW(), review_note = $2
-       WHERE status = 'pending' AND submitted_at < NOW() - ($1::int * INTERVAL '1 day');`,
+       WHERE status = 'pending' AND submitted_at < NOW() - ($1::int * INTERVAL '1 day')
+       RETURNING id, record_type, record_id;`,
       [days, `Auto-approved after ${days} days without review.`]
     );
+    for (const row of result.rows) {
+      await applyApprovalSideEffects(row.record_type, row.record_id, { user: null });
+    }
   } catch (err) {
     console.error("Auto-approve failed:", err.message);
   }
@@ -2430,7 +2686,179 @@ const queueReviewSafely = async (recordType, recordId, req) => {
   }
 };
 
-app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
+// A nest-event that reports hatchlings leaving the nest is how a nest's own
+// status moves from incubating to hatching - but only once a Field Leader has
+// confirmed it, the same trust boundary record_reviews already enforces for
+// everything else a Volunteer submits. Approving a volunteer-submitted
+// nest_event of an emergence/hatching type is therefore the trigger point,
+// not the event's own creation.
+const applyApprovalSideEffects = async (recordType, recordId, req) => {
+  // QA-072: approving the survey as a whole must fire the same side effects
+  // as approving each folded nest_event directly would - folding the review
+  // rows together must not also fold away the nest status transitions.
+  if (recordType === "morning_survey") {
+    try {
+      const folded = await db.query(
+        `SELECT id FROM turtle_nest_events WHERE survey_id = $1;`,
+        [recordId]
+      );
+      for (const row of folded.rows) {
+        await applyApprovalSideEffects("nest_event", row.id, req);
+      }
+    } catch (err) {
+      console.error(`Could not propagate approval side effects for survey ${recordId}:`, err.message);
+    }
+    return;
+  }
+  if (recordType === "turtle") {
+    try {
+      const ev = await db.query(
+        `SELECT * FROM turtle_survey_events WHERE turtle_id = $1 ORDER BY created_at DESC LIMIT 1;`,
+        [recordId]
+      );
+      const row = ev.rows[0];
+      if (!row) return;
+      const updated = await db.query(
+        `UPDATE turtles SET
+           health_condition = $1,
+           front_left_tag = COALESCE(NULLIF($2, ''), front_left_tag),
+           front_left_address = COALESCE(NULLIF($3, ''), front_left_address),
+           front_right_tag = COALESCE(NULLIF($4, ''), front_right_tag),
+           front_right_address = COALESCE(NULLIF($5, ''), front_right_address),
+           rear_left_tag = COALESCE(NULLIF($6, ''), rear_left_tag),
+           rear_left_address = COALESCE(NULLIF($7, ''), rear_left_address),
+           rear_right_tag = COALESCE(NULLIF($8, ''), rear_right_tag),
+           rear_right_address = COALESCE(NULLIF($9, ''), rear_right_address),
+           scl_max = $10, scl_min = $11, scw = $12,
+           ccl_max = $13, ccl_min = $14, ccw = $15,
+           tail_extension = $16, vent_to_tail_tip = $17, total_tail_length = $18,
+           updated_at = NOW()
+         WHERE id = $19
+         RETURNING name;`,
+        [row.health_condition,
+         row.front_left_tag, row.front_left_address,
+         row.front_right_tag, row.front_right_address,
+         row.rear_left_tag, row.rear_left_address,
+         row.rear_right_tag, row.rear_right_address,
+         row.scl_max, row.scl_min, row.scw,
+         row.ccl_max, row.ccl_min, row.ccw,
+         row.tail_extension, row.vent_to_tail_tip, row.total_tail_length,
+         recordId]
+      );
+      if (updated.rows.length === 0) return;
+      await recordAudit(db, {
+        recordType: "turtle",
+        recordId,
+        action: "updated",
+        req,
+        summary: `Profile measurements updated from approved sighting (${updated.rows[0]?.name ?? recordId})`,
+      });
+    } catch (err) {
+      console.error(`Could not apply turtle profile update for turtle ${recordId}:`, err.message);
+    }
+    return;
+  }
+  if (recordType !== "nest_event") return;
+  try {
+    const ev = await db.query(
+      `SELECT e.event_type, e.nest_id, e.eggs_reburied, e.total_eggs, e.created_at, n.date_found,
+              e.original_depth_top_egg_h, e.original_depth_bottom_chamber_h, e.original_width_w
+       FROM turtle_nest_events e LEFT JOIN turtle_nests n ON n.id = e.nest_id WHERE e.id = $1;`,
+      [recordId]
+    );
+    const row = ev.rows[0];
+    if (!row || row.nest_id == null) return;
+
+    if (
+      (isEmergenceType(row.event_type) || isExcavationType(row.event_type)) &&
+      hatchlingTrackTooEarlyError(row.event_type, row.date_found, row.created_at)
+    ) {
+      console.error(`Skipping status transition for nest_event ${recordId}: event logged too soon after laid_date.`);
+      return;
+    }
+
+    const type = row.event_type;
+    let targetStatus = null;
+    let fromStatuses = null;
+
+    if (isEmergenceType(type)) {
+      targetStatus = "hatching";
+      fromStatuses = ["incubating"];
+    } else if (isExcavationType(type)) {
+      // Many nests are found already laid or in a rush, with no chamber
+      // depth/width on record from NestEntry - the final inventory is often
+      // the first and only time anyone actually measures the chamber
+      // (QA-098). Fill in only what the nest doesn't already have; never
+      // overwrite a real measurement taken when the nest was first logged.
+      if (row.original_depth_top_egg_h != null || row.original_depth_bottom_chamber_h != null || row.original_width_w != null) {
+        const backfilled = await db.query(
+          `UPDATE turtle_nests SET
+             depth_top_egg_h = COALESCE(depth_top_egg_h, $2),
+             depth_bottom_chamber_h = COALESCE(depth_bottom_chamber_h, $3),
+             width_w = COALESCE(width_w, $4),
+             updated_at = NOW()
+           WHERE id = $1
+             AND (depth_top_egg_h IS NULL OR depth_bottom_chamber_h IS NULL OR width_w IS NULL)
+           RETURNING nest_code;`,
+          [row.nest_id, row.original_depth_top_egg_h, row.original_depth_bottom_chamber_h, row.original_width_w]
+        );
+        if (backfilled.rows.length > 0) {
+          await recordAudit(db, {
+            recordType: "nest",
+            recordId: row.nest_id,
+            action: "updated",
+            req,
+            summary: `Chamber depth/width filled in from inventory measurements (${backfilled.rows[0].nest_code})`,
+          });
+        }
+      }
+
+      // TOP_EGG does not match isExcavationType, so a top-egg check never
+      // moves status - matches the old frontend's isTopEggCheck guard.
+      const reburied = Number(row.eggs_reburied) || 0;
+      const total = Number(row.total_eggs) || 0;
+      if (reburied === 0) {
+        targetStatus = "hatched";
+        fromStatuses = ["incubating", "hatching"];
+      } else if (total > 0 && reburied < total) {
+        targetStatus = "hatching";
+        fromStatuses = ["incubating"];
+      } else {
+        return;
+      }
+    } else {
+      return;
+    }
+
+    const before = await db.query(
+      `SELECT nest_code, status FROM turtle_nests WHERE id = $1 AND status = ANY($2::text[]);`,
+      [row.nest_id, fromStatuses]
+    );
+    if (before.rows.length === 0) return; // already past this status, or gone
+
+    const updated = await db.query(
+      `UPDATE turtle_nests SET status = $2, updated_at = NOW() WHERE id = $1 RETURNING nest_code;`,
+      [row.nest_id, targetStatus]
+    );
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: row.nest_id,
+      action: "updated",
+      req,
+      summary: `Status ${before.rows[0].status} → ${targetStatus} (${isExcavationType(type) ? "inventory" : "hatchling track"} approved) (${updated.rows[0]?.nest_code ?? before.rows[0].nest_code})`,
+    });
+  } catch (err) {
+    // Same posture as queueReviewSafely/recordAudit: never turn a successful
+    // approval into an error for the reviewer because a side effect failed.
+    console.error(`Could not apply nest status transition for nest_event ${recordId}:`, err.message);
+  }
+};
+
+// QA-064: a Field Assistant could archive or restore any turtle via the API
+// even though the UI never offers it to them - the same class of gap as
+// QA-001/QA-030/QA-042, and inconsistent with FA already getting 403 on
+// DELETE /turtles/:id.
+app.put("/turtles/:id/archive", requireRole(COORDINATOR, LEADER), async (req, res) => {
   try {
     const { id } = req.params;
     const archived = req.body?.archived !== false; // default to archiving
@@ -2524,10 +2952,73 @@ app.get("/turtles/:turtle_id/survey_events", async (req, res) => {
   }
 });
 
-// Update turtle tags + measurements + health condition endpoint
+// QA-047: once a sighting was submitted - a duplicate, the wrong turtle, a
+// mis-keyed measurement - there was no way to remove it; the only "fix" was
+// submitting more events on top, which just added to the pile. A Coordinator
+// or Field Leader can now delete one directly. Deleting the turtle's most
+// recent sighting also leaves its profile (scl/ccl/tags/etc, pushed there by
+// applyApprovalSideEffects) stamped with the deleted event's numbers, so this
+// re-derives the profile from whatever sighting is now most recent - the same
+// side effect a normal approval would have applied, just run again.
+app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await db.query(
+      `SELECT id, turtle_id, event_type, event_date FROM turtle_survey_events WHERE id = $1 LIMIT 1;`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Survey event not found." });
+    }
+    const { turtle_id } = existing.rows[0];
+
+    const deleted = await db.query(
+      `DELETE FROM turtle_survey_events WHERE id = $1 RETURNING *;`,
+      [id]
+    );
+    if (deleted.rowCount === 0) {
+      return res.status(404).json({ error: "Survey event not found." });
+    }
+
+    // A deleted record leaves nothing for its review row to point at.
+    await db.query(
+      `DELETE FROM record_reviews WHERE record_type = 'turtle_survey_event' AND record_id = $1;`,
+      [id]
+    );
+
+    await applyApprovalSideEffects("turtle", turtle_id, req);
+
+    await recordAudit(db, {
+      recordType: "turtle_survey_event",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: `${deleted.rows[0].event_type || "Encounter"} of turtle ${turtle_id}`,
+    });
+
+    res.json({ message: "Survey event deleted successfully", deleted_event: deleted.rows[0] });
+  } catch (err) {
+    console.error("Delete turtle survey event error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Update turtle tags + measurements + health condition endpoint.
+//
+// Records/TurtleDetails hide the Edit button for a Field Volunteer, so the
+// only legitimate path through here for one is "My Submissions > Edit & send
+// back for review" on their own record - same ownership check record_audit
+// already provides for that flow. requireRole still lists VOLUNTEER (the
+// resubmit flow needs it), so the ownership guard below is what keeps a
+// Volunteer from editing someone else's turtle via the API directly.
 app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (req.user.role === VOLUNTEER && !(await isOwnRecord("turtle", id, req.user.id))) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
 
     const {
       health_condition,
@@ -2583,6 +3074,11 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
     const measurementErr = minExceedsMaxError(req.body);
     if (measurementErr) {
       return res.status(400).json({ error: measurementErr });
+    }
+
+    const sclCclErr = sclExceedsCclError(req.body);
+    if (sclCclErr) {
+      return res.status(400).json({ error: sclCclErr });
     }
 
     const notInList = await listError(req.body, async () =>
@@ -2703,6 +3199,12 @@ app.get("/turtles/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
+    // QA-071: a non-numeric id (e.g. "abc") reached the query as-is, which
+    // Postgres rejects with an invalid-integer-input error - caught by the
+    // generic handler below as an opaque 500. Same guard already used by
+    // GET /users/:id (QA-060).
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "id must be a number." });
+
     const sql = `SELECT * FROM turtles WHERE id = $1;`;
     const result = await db.query(sql, [id]);
 
@@ -2774,6 +3276,17 @@ app.delete("/turtles/:id", requireRole(COORDINATOR, LEADER), async (req, res) =>
 
     await client.query("COMMIT");
 
+    // Extends the "deleted" audit entry already written for emergence
+    // deletes (QA-042) to nests and turtles too - without it, the trail went
+    // silent after "created" and there was no record of who removed either.
+    await recordAudit(db, {
+      recordType: "turtle",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: turtle.rows[0].name ? `Turtle ${turtle.rows[0].name}` : null,
+    });
+
     res.json({
       message: "Turtle deleted successfully",
       deleted_turtle: turtle.rows[0],
@@ -2813,7 +3326,6 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     "event_type", "location", "turtle_id",
     "scl_max", "scl_min", "scw",
     "ccl_max", "ccl_min", "ccw",
-    "tail_extension", "vent_to_tail_tip", "total_tail_length",
     "health_condition", "observer"
   ];
   for (const field of requiredFields) {
@@ -2827,6 +3339,9 @@ const insertTurtleSurveyEvent = async (executor, body) => {
 
   const measurementErr = minExceedsMaxError(body);
   if (measurementErr) return { error: measurementErr };
+
+  const sclCclErr = sclExceedsCclError(body);
+  if (sclCclErr) return { error: sclCclErr };
 
   const sql = `
     INSERT INTO turtle_survey_events (
@@ -2859,7 +3374,7 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     rear_right_tag || null, rear_right_address || null,
     scl_max, scl_min, scw,
     ccl_max, ccl_min, ccw,
-    tail_extension, vent_to_tail_tip, total_tail_length,
+    tail_extension ?? null, vent_to_tail_tip ?? null, total_tail_length ?? null,
     health_condition, observer, notes || null,
     time_first_seen || null, time_start_egg_laying || null, time_covering || null,
     time_end_camouflage || null, time_reach_sea || null,
@@ -2869,11 +3384,33 @@ const insertTurtleSurveyEvent = async (executor, body) => {
   return { row: result.rows[0] };
 };
 
-app.post("/turtle_survey_events/create", async (req, res) => {
+app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, res) => {
   try {
+    const { turtle_id } = req.body;
+    if (turtle_id !== undefined && turtle_id !== null) {
+      if (!/^\d+$/.test(String(turtle_id))) {
+        return res.status(400).json({ error: "turtle_id must be a number." });
+      }
+      const turtleCheck = await db.query(`SELECT id FROM turtles WHERE id = $1;`, [turtle_id]);
+      if (turtleCheck.rows.length === 0) {
+        return res.status(404).json({ error: "Turtle not found." });
+      }
+    }
+
     const { error, row } = await insertTurtleSurveyEvent(db, req.body);
     if (error) return res.status(400).json({ error });
 
+    const review = await queueReviewSafely("turtle", turtle_id, req);
+    // QA-091: when this submitter's role does not require review for "turtle"
+    // (the default for everyone except Field Volunteer), queueReviewSafely never
+    // inserts a record_reviews row, so nothing in the approval flow will ever run
+    // applyApprovalSideEffects for this sighting. Treat "no review required" the
+    // same as "already approved" and push the sighting's measurements onto the
+    // turtle's profile immediately - this is the only place that will ever do so
+    // for such a submission.
+    if (!review) {
+      await applyApprovalSideEffects("turtle", turtle_id, req);
+    }
     await recordAudit(db, {
       recordType: "turtle_survey_event",
       recordId: row.id,
@@ -2884,7 +3421,8 @@ app.post("/turtle_survey_events/create", async (req, res) => {
 
     res.json({
       message: "Turtle survey event created successfully",
-      event: row
+      event: row,
+      review
     });
   } catch (err) {
     console.error("Create turtle survey event error:", err);
@@ -3345,6 +3883,23 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
       return res.status(404).json({ error: "Nest not found." });
     }
 
+    // QA-101: a nest is created with its own 1:1 emergence row, which gets
+    // its own copy of the nest's GPS at creation time (see POST
+    // /nests/create) rather than deriving it. Correcting the nest's position
+    // here must not leave that copy stale - the emergence list, CSV and any
+    // map/survey use of emergences would otherwise keep showing the old,
+    // wrong coordinate even after the nest itself was fixed.
+    if (result.rows[0].emergence_id) {
+      try {
+        await db.query(
+          `UPDATE turtle_emergences SET gps_lat = $1, gps_long = $2 WHERE id = $3;`,
+          [gps_lat, gps_long, result.rows[0].emergence_id]
+        );
+      } catch (err) {
+        console.error(`Could not sync emergence ${result.rows[0].emergence_id} GPS after nest ${id} update:`, err.message);
+      }
+    }
+
     const changes = describeNestChanges(before.rows[0], result.rows[0]);
     await recordAudit(db, {
       recordType: "nest",
@@ -3613,7 +4168,8 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
       notes,
       start_time,
       end_time,
-      observer
+      observer,
+      survey_id
     } = req.body;
 
     if (!event_type || !nest_code) {
@@ -3631,13 +4187,18 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     }
 
     const nestResult = await db.query(
-      `SELECT n.id, n.total_num_eggs, ${EMERGED_SO_FAR_SQL}) AS emerged_so_far
+      `SELECT n.id, n.date_found, n.total_num_eggs, ${EMERGED_SO_FAR_SQL}) AS emerged_so_far
        FROM turtle_nests n WHERE n.nest_code = $1 LIMIT 1;`,
       [nest_code]
     );
 
     if (nestResult.rows.length === 0) {
       return res.status(404).json({ error: "Nest not found." });
+    }
+
+    const tooEarly = hatchlingTrackTooEarlyError(event_type, nestResult.rows[0].date_found);
+    if (tooEarly) {
+      return res.status(400).json({ error: tooEarly });
     }
 
     const excess = hatchlingsExceedClutch(
@@ -3668,12 +4229,12 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
         piped_alive_count, alive_within, dead_within, alive_above, dead_above,
         reburied_depth_top_egg_h, reburied_depth_bottom_chamber_h, reburied_width_w,
         reburied_distance_to_sea_s, reburied_gps_lat, reburied_gps_long,
-        notes, start_time, end_time, observer
+        notes, start_time, end_time, observer, survey_id
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
-        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57
+        $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58
       )
       RETURNING *;
     `;
@@ -3694,11 +4255,28 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
       piped_alive_count || null, alive_within || null, dead_within || null, alive_above || null, dead_above || null,
       reburied_depth_top_egg_h || null, reburied_depth_bottom_chamber_h || null, reburied_width_w || null,
       reburied_distance_to_sea_s || null, reburied_gps_lat || null, reburied_gps_long || null,
-      notes || null, start_time || null, end_time || null, observer || null
+      notes || null, start_time || null, end_time || null, observer || null, survey_id || null
     ];
 
     const result = await db.query(sql, values);
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
+    // QA-090: when this submitter's role does not require review for
+    // nest_event (the default for everyone except Field Volunteer),
+    // queueReviewSafely never inserts a record_reviews row, so nothing in
+    // the approval flow (decideReview / bulk-approve / applyAutoApprove)
+    // will ever run applyApprovalSideEffects for this event. Treat "no
+    // review required" the same as "already approved" and fire the nest
+    // status transition immediately - this is the only place that will
+    // ever do so for such a submission.
+    if (!review) {
+      await applyApprovalSideEffects("nest_event", result.rows[0]?.id, req);
+    }
+    // QA-072: a hatchling track logged as part of a morning survey walk is
+    // part of that one form, same as a linked nest/emergence - fold its own
+    // review into the survey's, when the survey is itself under review.
+    if (survey_id) {
+      await foldIntoSurveyReview(survey_id, "nest_event", result.rows[0].id);
+    }
     await recordAudit(db, { recordType: "nest_event", recordId: result.rows[0]?.id, action: "created", req,
       summary: describeNestEvent(result.rows[0]) });
     // The event's own audit row is on the event; the nest's history is what a
@@ -3791,6 +4369,10 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
+    if (req.user.role === VOLUNTEER && !(await isOwnRecord("nest_event", id, req.user.id))) {
+      return res.status(403).json({ error: "You do not have permission to do that." });
+    }
+
     const {
       event_type,
       nest_id,
@@ -3865,10 +4447,14 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
     // Same ceiling as on create, with this event's own earlier tracks left out
     // of the running total so correcting a count is not blocked by itself.
     const clutchResult = await db.query(
-      `SELECT n.total_num_eggs, ${EMERGED_SO_FAR_SQL} AND e.id <> $2) AS emerged_so_far
+      `SELECT n.date_found, n.total_num_eggs, ${EMERGED_SO_FAR_SQL} AND e.id <> $2) AS emerged_so_far
        FROM turtle_nests n WHERE n.id = $1 LIMIT 1;`,
       [nest_id, id]
     );
+    const tooEarly = hatchlingTrackTooEarlyError(event_type, clutchResult.rows[0]?.date_found);
+    if (tooEarly) {
+      return res.status(400).json({ error: tooEarly });
+    }
     const excess = hatchlingsExceedClutch(
       req.body,
       clutchResult.rows[0]?.total_num_eggs,
@@ -4202,6 +4788,14 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
       return res.status(404).json({ error: "Emergence not found." });
     }
 
+    await recordAudit(db, {
+      recordType: "emergence",
+      recordId: result.rows[0]?.id,
+      action: "updated",
+      req,
+      summary: result.rows[0]?.beach ? `Emergence at ${result.rows[0].beach}` : null,
+    });
+
     res.json({ message: "Emergence updated successfully", emergence: result.rows[0] });
   } catch (err) {
     console.error("Update emergence error:", err);
@@ -4241,6 +4835,17 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 
     await client.query(`DELETE FROM morning_survey_nests WHERE nest_id = $1;`, [id]);
 
+    // Same reasoning as the nest's own review row below: a deleted event
+    // leaves nothing for its review row to point at, so every event's
+    // review goes with it too, whatever its status.
+    const eventIds = events.rows.map((r) => r.id);
+    if (eventIds.length > 0) {
+      await client.query(
+        `DELETE FROM record_reviews WHERE record_type = 'nest_event' AND record_id = ANY($1::int[]);`,
+        [eventIds]
+      );
+    }
+
     // See the matching comment in DELETE /turtles/:id.
     await client.query(
       `DELETE FROM record_reviews WHERE record_type = 'nest' AND record_id = $1;`,
@@ -4272,6 +4877,17 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 
     await client.query("COMMIT");
 
+    // Extends the "deleted" audit entry already written for emergence
+    // deletes (QA-042) to nests and turtles too - without it, the trail went
+    // silent after "created" and there was no record of who removed either.
+    await recordAudit(db, {
+      recordType: "nest",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: deleted.rows[0].nest_code ? `Nest ${deleted.rows[0].nest_code}` : null,
+    });
+
     res.json({
       message: "Nest deleted successfully",
       deleted_nest: deleted.rows[0],
@@ -4293,7 +4909,11 @@ app.delete("/nests/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
 // those would strip data off a nest that is still in the season's records, so
 // this refuses and names the nest instead of cascading. Links from morning
 // surveys are just join rows and are removed with it.
-app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"), async (req, res) => {
+// QA-042: a Field Assistant could delete any emergence via the API even
+// though the UI never offers it to them (only "Edit record") - the same
+// class of gap as QA-001/QA-030, and inconsistent with FA already getting
+// 403 on DELETE /nests and DELETE /turtles.
+app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { id } = req.params;
   const client = await db.connect();
 
@@ -4335,6 +4955,16 @@ app.delete("/emergences/:id", requireRole(COORDINATOR, LEADER, "Field Assistant"
     }
 
     await client.query("COMMIT");
+
+    // QA-042: deletion wasn't audited at all - the trail went silent after
+    // "created", so there was no record of who removed it.
+    await recordAudit(db, {
+      recordType: "emergence",
+      recordId: Number(id),
+      action: "deleted",
+      req,
+      summary: emergence.rows[0].beach ? `Emergence at ${emergence.rows[0].beach}` : null,
+    });
 
     res.json({
       message: "Emergence deleted successfully",
@@ -4525,6 +5155,44 @@ app.delete("/shifts/:id", requireRole(COORDINATOR), async (req, res) => {
 // Timetable table
 //--------------------------------------------------------------
 
+// QA-103: whether two shifts on the same day actually clash, by clock time -
+// not just whether they're literally the same shift_id (the only thing the
+// table's unique constraint below catches). Shift times are "HH:MM:SS"
+// strings; a shift whose end is not after its start is treated as crossing
+// midnight (e.g. a Night shift 20:00-02:00) so it isn't wrongly cleared
+// against anything after its start that same evening.
+const timeToMinutes = (t) => {
+  if (!t) return null;
+  const [h, m] = String(t).split(':').map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+};
+
+// QA-103 (run 2): the three real beach-survey shifts in this deployment have
+// start_time set but no end_time - a morning walk ends whenever it ends, not
+// on a schedule - so the check above silently never fired for exactly the
+// case it was written for (two Morning surveys, same start, no end). A
+// typical duration per shift_type stands in only when end_time is missing,
+// so two surveys starting together still clash, while a real same-day
+// Morning-then-Afternoon combination still does not.
+const DEFAULT_SHIFT_DURATION_MINUTES = { Morning: 180, Afternoon: 60, Night: 240 };
+const effectiveShiftEnd = (startTime, endTime, shiftType) => {
+  if (endTime) return endTime;
+  const start = timeToMinutes(startTime);
+  if (start === null) return null;
+  const duration = DEFAULT_SHIFT_DURATION_MINUTES[shiftType] ?? 60;
+  const end = (start + duration) % (24 * 60);
+  return `${String(Math.floor(end / 60)).padStart(2, "0")}:${String(end % 60).padStart(2, "0")}:00`;
+};
+
+const shiftsOverlap = (aStart, aEnd, bStart, bEnd) => {
+  let as = timeToMinutes(aStart), ae = timeToMinutes(aEnd);
+  let bs = timeToMinutes(bStart), be = timeToMinutes(bEnd);
+  if (as === null || ae === null || bs === null || be === null) return false;
+  if (ae <= as) ae += 24 * 60;
+  if (be <= bs) be += 24 * 60;
+  return as < be && bs < ae;
+};
+
 // Create a new shift assignment
 app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res) => {
   const { user_id, shift_id, work_date } = req.body;
@@ -4534,13 +5202,37 @@ app.post('/timetable/create', requireRole(COORDINATOR, LEADER), async (req, res)
   }
 
   try {
+    const [newShift, thatDay] = await Promise.all([
+      db.query(`SELECT start_time, end_time, shift_type FROM shifts WHERE shift_id = $1;`, [shift_id]),
+      db.query(
+        `SELECT s.shift_id, s.shift_name, s.start_time, s.end_time, s.shift_type
+         FROM Timetable t JOIN shifts s ON s.shift_id = t.shift_id
+         WHERE t.user_id = $1 AND t.work_date = $2;`,
+        [user_id, work_date]
+      ),
+    ]);
+    const ns = newShift.rows[0];
+    if (ns) {
+      const nsEnd = effectiveShiftEnd(ns.start_time, ns.end_time, ns.shift_type);
+      const clash = thatDay.rows.find(
+        (r) =>
+          r.shift_id !== shift_id &&
+          shiftsOverlap(ns.start_time, nsEnd, r.start_time, effectiveShiftEnd(r.start_time, r.end_time, r.shift_type))
+      );
+      if (clash) {
+        return res.status(409).json({
+          error: `This person is already booked on "${clash.shift_name}" (${clash.start_time}-${clash.end_time || "open-ended"}) that day, which overlaps this shift.`,
+        });
+      }
+    }
+
     const query = `
       INSERT INTO Timetable (user_id, shift_id, work_date)
       VALUES ($1, $2, $3)
       RETURNING *;
     `;
     const values = [user_id, shift_id, work_date];
-    
+
     const result = await db.query(query, values);
 
     res.status(201).json({
@@ -5562,6 +6254,7 @@ const REVIEW_DETAIL_SQL = {
   morning_survey: `SELECT ms.id,
                           (to_jsonb(ms) || jsonb_build_object(
                             'beach', b.name,
+                            'survey_area', b.survey_area,
                             'linked_nests', COALESCE((
                               SELECT jsonb_agg(
                                 ((to_jsonb(tn) - 'tri_tl_img' - 'tri_tr_img') || jsonb_build_object(
@@ -5581,6 +6274,11 @@ const REVIEW_DETAIL_SQL = {
                                 )) ORDER BY te.id)
                               FROM morning_survey_emergences mse JOIN turtle_emergences te ON te.id = mse.emergence_id
                               WHERE mse.survey_id = ms.id
+                            ), '[]'::jsonb),
+                            'linked_tracks', COALESCE((
+                              SELECT jsonb_agg(to_jsonb(ev) ORDER BY ev.id)
+                              FROM turtle_nest_events ev
+                              WHERE ev.survey_id = ms.id
                             ), '[]'::jsonb)
                           )) AS detail
                    FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
@@ -5614,15 +6312,21 @@ const describeReviewedRecords = async (rows, { detail = true } = {}) => {
   }
 
   const labels = new Map();
+  const kinds = new Map();
   for (const [type, ids] of byType) {
-    const { table, describe } = REVIEWABLE[type];
-    // Table and expression come from REVIEWABLE, never from the request, so they
-    // are safe to interpolate; the ids stay parameterised.
+    const { table, describe, describeKind } = REVIEWABLE[type];
+    // Table and expressions come from REVIEWABLE, never from the request, so
+    // they are safe to interpolate; the ids stay parameterised. describeKind
+    // is only set for record types whose label depends on a subtype (today
+    // just nest_event); every other type's query is unchanged.
     const found = await db.query(
-      `SELECT id, ${describe} AS label FROM ${table} WHERE id = ANY($1::int[]);`,
+      `SELECT id, ${describe} AS label${describeKind ? `, ${describeKind} AS kind` : ""} FROM ${table} WHERE id = ANY($1::int[]);`,
       [ids]
     );
-    for (const row of found.rows) labels.set(`${type}:${row.id}`, row.label);
+    for (const row of found.rows) {
+      labels.set(`${type}:${row.id}`, row.label);
+      if (describeKind) kinds.set(`${type}:${row.id}`, row.kind);
+    }
   }
 
   const details = detail ? await loadReviewDetails(byType) : new Map();
@@ -5631,7 +6335,7 @@ const describeReviewedRecords = async (rows, { detail = true } = {}) => {
     ...r,
     record_label: labels.get(`${r.record_type}:${r.record_id}`) ?? null,
     record_detail: details.get(`${r.record_type}:${r.record_id}`) ?? null,
-    record_kind: REVIEWABLE[r.record_type]?.label ?? r.record_type,
+    record_kind: kinds.get(`${r.record_type}:${r.record_id}`) ?? REVIEWABLE[r.record_type]?.label ?? r.record_type,
     // A record that no longer exists was deleted after being submitted. Say so
     // rather than showing a reviewer a blank row they cannot act on.
     record_missing: !labels.has(`${r.record_type}:${r.record_id}`),
@@ -5706,7 +6410,7 @@ const decideReview = (decision) => async (req, res) => {
       `UPDATE record_reviews
        SET status = $1, reviewed_by = $2, reviewed_at = NOW(), review_note = $3
        WHERE id = $4 AND status = 'pending'
-       RETURNING id;`,
+       RETURNING id, record_type, record_id;`,
       [decision, req.user.id, note, id]
     );
 
@@ -5721,6 +6425,11 @@ const decideReview = (decision) => async (req, res) => {
         error: `Already ${existing.rows[0].status} by someone else.`,
         status: existing.rows[0].status,
       });
+    }
+
+    if (decision === "approved") {
+      const { record_type, record_id } = result.rows[0];
+      await applyApprovalSideEffects(record_type, record_id, req);
     }
 
     const full = await db.query(`${REVIEW_SELECT} WHERE r.id = $1;`, [id]);
@@ -5756,6 +6465,42 @@ app.delete("/reviews/:id", requireRole(...REVIEWERS), async (req, res) => {
 
 
 app.post("/reviews/:id/reject", requireRole(...REVIEWERS), decideReview("rejected"));
+
+// Approves several reviews in one request - a morning survey walk across
+// several beaches queues one review per beach (QA-034), and a reviewer who
+// has already looked at all of them should not have to click Approve N
+// times. Only ever approves rows still pending; anything already decided
+// (by this reviewer's own earlier single-item click, or by someone else) is
+// reported back rather than erroring the whole batch out.
+app.post("/reviews/bulk-approve", requireRole(...REVIEWERS), async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ error: "No review ids given." });
+    }
+
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET status = 'approved', reviewed_by = $1, reviewed_at = NOW()
+       WHERE id = ANY($2::int[]) AND status = 'pending'
+       RETURNING id, record_type, record_id;`,
+      [req.user.id, ids]
+    );
+    const approvedIds = result.rows.map((r) => r.id);
+    const skippedIds = ids.filter((id) => !approvedIds.includes(id));
+
+    for (const row of result.rows) {
+      await applyApprovalSideEffects(row.record_type, row.record_id, req);
+    }
+
+    const full = await db.query(`${REVIEW_SELECT} WHERE r.id = ANY($1::int[]);`, [approvedIds]);
+    const reviews = await describeReviewedRecords(full.rows);
+    res.json({ message: `${approvedIds.length} record(s) approved.`, reviews, skippedIds });
+  } catch (err) {
+    console.error("Bulk approve error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
 
 // Lets the person who submitted a rejected record put it back in the queue
 // after fixing it - self-service, no reviewer role needed, but only for their
@@ -5836,8 +6581,18 @@ app.get("/alerts", async (req, res) => {
          ORDER BY r.reviewed_at DESC NULLS LAST LIMIT 50;`,
         [req.user.id]
       );
-      for (const r of await describeReviewedRecords(decided.rows, { detail: false })) {
-        if (r.record_missing || !["approved", "rejected"].includes(r.status)) continue;
+      const described = (await describeReviewedRecords(decided.rows, { detail: false }))
+        .filter((r) => !r.record_missing && ["approved", "rejected"].includes(r.status));
+
+      // A multi-beach morning survey walk is one record_reviews row per beach
+      // (QA-034), so bulk-approving it leaves one review_approved alert per
+      // beach too. They share reviewed_by/reviewed_at (bulk-approve updates
+      // them all in one statement) and the same survey, so group them back
+      // into the single walk a volunteer actually submitted (QA-059).
+      const morningApproved = described.filter((r) => r.record_type === "morning_survey" && r.status === "approved");
+      const rest = described.filter((r) => !(r.record_type === "morning_survey" && r.status === "approved"));
+
+      for (const r of rest) {
         const rejected = r.status === "rejected";
         alerts.push({
           id: `review-${r.id}`, review_id: r.id,
@@ -5848,6 +6603,46 @@ app.get("/alerts", async (req, res) => {
             : `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
           at: r.reviewed_at, can_acknowledge: true,
         });
+      }
+
+      if (morningApproved.length) {
+        const meta = await db.query(
+          `SELECT ms.id AS survey_id, ms.survey_date, b.survey_area, b.name AS beach_name
+           FROM morning_surveys ms LEFT JOIN beaches b ON b.id = ms.beach_id
+           WHERE ms.id = ANY($1::int[]);`,
+          [morningApproved.map((r) => r.record_id)]
+        );
+        const metaBySurvey = new Map(meta.rows.map((row) => [row.survey_id, row]));
+
+        const groups = new Map();
+        for (const r of morningApproved) {
+          const m = metaBySurvey.get(r.record_id) || {};
+          const key = `${r.reviewed_at}|${m.survey_date}|${m.survey_area}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push({ r, m });
+        }
+
+        for (const group of groups.values()) {
+          if (group.length === 1) {
+            const { r } = group[0];
+            alerts.push({
+              id: `review-${r.id}`, review_id: r.id,
+              kind: "review_approved", title: "Approved",
+              message: `${what(r)} was approved${r.reviewed_by == null ? " automatically" : ""}.`,
+              at: r.reviewed_at, can_acknowledge: true,
+            });
+          } else {
+            const ids = group.map(({ r }) => r.id).sort((a, b) => a - b);
+            const area = group[0].m.survey_area
+              || [...new Set(group.map(({ m }) => m.beach_name).filter(Boolean))].join(", ");
+            alerts.push({
+              id: `review-group-${ids.join(",")}`, review_ids: ids,
+              kind: "review_approved", title: "Approved",
+              message: `Your ${area} walk was approved.`,
+              at: group[0].r.reviewed_at, can_acknowledge: true,
+            });
+          }
+        }
       }
     }
 
@@ -5906,17 +6701,36 @@ app.get("/alerts", async (req, res) => {
 
 app.post("/alerts/:id/acknowledge", async (req, res) => {
   try {
-    const reviewId = Number.parseInt(String(req.params.id).replace(/^review-/, ""), 10);
-    if (!Number.isInteger(reviewId)) return res.status(400).json({ error: "Unknown alert." });
-    // The submitter, or a reviewer on their behalf (shared acknowledgement).
-    const result = await db.query(
-      `UPDATE record_reviews
-       SET acknowledged_at = NOW(), acknowledged_by = $2
-       WHERE id = $1 AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
-         AND (submitted_by = $2 OR $3::boolean)
-       RETURNING id;`,
-      [reviewId, req.user.id, REVIEWERS.includes(req.user.role)]
-    );
+    const rawId = String(req.params.id);
+    // A grouped morning-survey alert (QA-059) covers several record_reviews
+    // rows at once; clear them all in the one statement rather than making
+    // the caller loop. A partial match (someone already cleared one beach's
+    // row) still counts as success, same as the single-id case below.
+    const isGroup = rawId.startsWith("review-group-");
+    let sql, idParam;
+    if (isGroup) {
+      const ids = rawId.slice("review-group-".length).split(",").map((s) => Number.parseInt(s, 10));
+      if (ids.length === 0 || ids.some((n) => !Number.isInteger(n))) {
+        return res.status(400).json({ error: "Unknown alert." });
+      }
+      idParam = ids;
+      sql = `UPDATE record_reviews
+             SET acknowledged_at = NOW(), acknowledged_by = $2
+             WHERE id = ANY($1::int[]) AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+               AND (submitted_by = $2 OR $3::boolean)
+             RETURNING id;`;
+    } else {
+      const reviewId = Number.parseInt(rawId.replace(/^review-/, ""), 10);
+      if (!Number.isInteger(reviewId)) return res.status(400).json({ error: "Unknown alert." });
+      idParam = reviewId;
+      // The submitter, or a reviewer on their behalf (shared acknowledgement).
+      sql = `UPDATE record_reviews
+             SET acknowledged_at = NOW(), acknowledged_by = $2
+             WHERE id = $1 AND status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+               AND (submitted_by = $2 OR $3::boolean)
+             RETURNING id;`;
+    }
+    const result = await db.query(sql, [idParam, req.user.id, REVIEWERS.includes(req.user.role)]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "That alert is already cleared, or is not yours to clear." });
     }

@@ -112,4 +112,41 @@ describe('POST /turtles/create-with-event', () => {
     const res = await request(app).post('/turtles/create-with-event').send({ ...validTurtle, ...validEventFields });
     expect(res.status).toBe(401);
   });
+
+  // QA-063: tail_extension/vent_to_tail_tip/total_tail_length are
+  // "recommended", not required - a turtle whose tail couldn't be fully
+  // measured must still save, and the event INSERT must bind null (not
+  // undefined, which the pg driver rejects) for each one left out.
+  it('creates the turtle and event when all three tail measurements are omitted', async () => {
+    const { tail_extension, vent_to_tail_tip, total_tail_length, ...eventFieldsNoTail } = validEventFields;
+    const res = await auth(request(app).post('/turtles/create-with-event')).send({
+      ...validTurtle,
+      ...eventFieldsNoTail,
+    });
+
+    expect(res.status).toBe(200);
+    expect(committed).toBe(true);
+
+    const [, eventParams] = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO turtle_survey_events'));
+    // tail_extension, vent_to_tail_tip, total_tail_length are the 19th-21st bound params.
+    const tailParams = eventParams.slice(18, 21);
+    expect(tailParams).toEqual([null, null, null]);
+    expect(tailParams.every((v) => v !== undefined)).toBe(true);
+  });
+
+  it('creates the turtle and event when only one of the three tail measurements is given', async () => {
+    const res = await auth(request(app).post('/turtles/create-with-event')).send({
+      ...validTurtle,
+      ...validEventFields,
+      vent_to_tail_tip: null,
+      total_tail_length: null,
+    });
+
+    expect(res.status).toBe(200);
+    expect(committed).toBe(true);
+
+    const [, eventParams] = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO turtle_survey_events'));
+    const tailParams = eventParams.slice(18, 21);
+    expect(tailParams).toEqual([10, null, null]);
+  });
 });
