@@ -1599,6 +1599,44 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
 // anyway, an orphan with no events, invisible in Turtle Records and (worse)
 // holding tags that then blocked the corrected retry from using them.
 // Returns { row } or { error }; only throws on an actual DB failure.
+// Flipper tags are physical, one per animal, so a tag on an active turtle
+// cannot be given to another one. Archived turtles are excluded, so a tag can
+// be reused once its old owner is archived. Compared as stored (KF- prefix
+// included), against all four positions of every active turtle.
+const TAG_POSITIONS = [
+  ["front_left_tag", "Front Left"],
+  ["front_right_tag", "Front Right"],
+  ["rear_left_tag", "Rear Left"],
+  ["rear_right_tag", "Rear Right"],
+];
+
+const tagConflictError = async (executor, body) => {
+  const wanted = TAG_POSITIONS
+    .map(([field, label]) => ({ tag: typeof body[field] === "string" ? body[field].trim() : "", label }))
+    .filter((t) => t.tag);
+  if (wanted.length === 0) return null;
+
+  const tags = wanted.map((t) => t.tag);
+  const result = await executor.query(
+    `SELECT id, name, front_left_tag, front_right_tag, rear_left_tag, rear_right_tag
+     FROM turtles
+     WHERE is_archived = FALSE
+       AND (front_left_tag = ANY($1::text[]) OR front_right_tag = ANY($1::text[])
+            OR rear_left_tag = ANY($1::text[]) OR rear_right_tag = ANY($1::text[]));`,
+    [tags]
+  );
+
+  for (const { tag, label } of wanted) {
+    const owner = result.rows.find((r) =>
+      [r.front_left_tag, r.front_right_tag, r.rear_left_tag, r.rear_right_tag].includes(tag)
+    );
+    if (owner) {
+      return `Tag ${tag} (${label}) is already assigned to ${owner.name || `Turtle #${owner.id}`}.`;
+    }
+  }
+  return null;
+};
+
 const insertTurtle = async (executor, body) => {
   let {
     name, species, sex, health_condition,
@@ -1630,6 +1668,9 @@ const insertTurtle = async (executor, body) => {
 
   const notInList = await listError(body);
   if (notInList) return { error: notInList };
+
+  const tagError = await tagConflictError(executor, body);
+  if (tagError) return { error: tagError, conflict: true };
 
   const sql = `
     INSERT INTO turtles (
@@ -1672,8 +1713,8 @@ const insertTurtle = async (executor, body) => {
 // Create Turtle endpoint
 app.post("/turtles/create", requireRole(...RECORDERS), async (req, res) => {
   try {
-    const { error, row } = await insertTurtle(db, req.body);
-    if (error) return res.status(400).json({ error });
+    const { error, conflict, row } = await insertTurtle(db, req.body);
+    if (error) return res.status(conflict ? 409 : 400).json({ error });
 
     const review = await queueReviewSafely("turtle", row.id, req);
     await recordAudit(db, { recordType: "turtle", recordId: row.id, action: "created", req,
@@ -2557,6 +2598,10 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
     // recorded value rather than erasing it, the same way name/species/sex
     // already do below. Measurements are the one thing this route exists to
     // overwrite, so those stay a plain replace.
+    // A blank measurement or identity field means "not provided" on a
+    // re-sighting, so it keeps the stored value rather than erasing it.
+    const notBlank = (v) => (v === undefined || v === null || (typeof v === "string" && v.trim() === "") ? null : v);
+
     const sql = `
       UPDATE turtles
       SET
@@ -2582,9 +2627,9 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
         ccl_min = $14,
         ccw = $15,
 
-        tail_extension = $16,
-        vent_to_tail_tip = $17,
-        total_tail_length = $18,
+        tail_extension = COALESCE($16, tail_extension),
+        vent_to_tail_tip = COALESCE($17, vent_to_tail_tip),
+        total_tail_length = COALESCE($18, total_tail_length),
 
         name = COALESCE($20, name),
         species = COALESCE($21, species),
@@ -2618,15 +2663,15 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
       ccl_min ?? null,
       ccw ?? null,
 
-      tail_extension ?? null,
-      vent_to_tail_tip ?? null,
-      total_tail_length ?? null,
+      notBlank(tail_extension),
+      notBlank(vent_to_tail_tip),
+      notBlank(total_tail_length),
 
       id,
 
-      name ?? null,
-      species ?? null,
-      sex ?? null
+      notBlank(name),
+      notBlank(species),
+      notBlank(sex)
     ]);
 
     if (result.rows.length === 0) {
@@ -2847,6 +2892,50 @@ app.post("/turtle_survey_events/create", async (req, res) => {
   }
 });
 
+// Void a turtle survey event (a re-sighting or encounter) entered in error.
+// Coordinator only, audited in the same transaction. The turtle itself is
+// untouched - it is not re-derived from the events it had.
+app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const deleted = await client.query(
+      `DELETE FROM turtle_survey_events WHERE id = $1 RETURNING id, turtle_id, event_type, location;`,
+      [id]
+    );
+
+    if (deleted.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Turtle survey event not found." });
+    }
+
+    // See the note in DELETE /nest-events/:id - an unaudited deletion is refused.
+    const row = deleted.rows[0];
+    const audited = await recordAudit(client, { recordType: "turtle_survey_event", recordId: row.id, action: "deleted", req,
+      summary: `${row.event_type || "Encounter"} of turtle ${row.turtle_id}${row.location ? ` at ${row.location}` : ""}` });
+    if (!audited) {
+      await client.query("ROLLBACK");
+      return res.status(500).json({ error: "Could not record the deletion, so nothing was deleted." });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Turtle survey event deleted successfully",
+      deleted_event: row
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Delete turtle survey event error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
+  }
+});
+
 // Creates a brand new turtle and its first encounter atomically (QA-027).
 // TaggingEntry's "New Turtle" flow used to be two separate requests: a
 // failed second request (most often the event's own future-date or
@@ -2859,10 +2948,13 @@ app.post("/turtles/create-with-event", requireRole(...RECORDERS), async (req, re
   try {
     await client.query("BEGIN");
 
+    // Serialises concurrent tag checks: two new turtles claiming the same tag
+    // cannot both pass tagConflictError before either commits.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('turtles_tag_assignment'))");
     const turtleResult = await insertTurtle(client, req.body);
     if (turtleResult.error) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ error: turtleResult.error });
+      return res.status(turtleResult.conflict ? 409 : 400).json({ error: turtleResult.error });
     }
     const turtle = turtleResult.row;
 
@@ -3860,6 +3952,57 @@ app.put("/nest-events/:id", requireRole(...RECORDERS), async (req, res) => {
 //---------------------------------------------------------------
 
 // Create a new turtle emergence
+// Void a nest event entered in error. Coordinator only: a deletion is not
+// something a field worker should be able to take back. Recorded in the audit
+// trail inside the same transaction, so the deletion is never unrecorded.
+app.delete("/nest-events/:id", requireRole(COORDINATOR), async (req, res) => {
+  const { id } = req.params;
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const deleted = await client.query(
+      `DELETE FROM turtle_nest_events WHERE id = $1 RETURNING id, nest_code, event_type;`,
+      [id]
+    );
+
+    if (deleted.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Nest event not found." });
+    }
+
+    await client.query(
+      `DELETE FROM record_reviews WHERE record_type = 'nest_event' AND record_id = $1;`,
+      [id]
+    );
+
+    // Unlike other writes, a deletion must not go through unrecorded: recordAudit
+    // reports a failed insert as null, and the transaction is then aborted, so
+    // the COMMIT below would silently undo the delete. Refuse instead.
+    const row = deleted.rows[0];
+    const audited = await recordAudit(client, { recordType: "nest_event", recordId: row.id, action: "deleted", req,
+      summary: `${row.event_type || "Nest event"} on ${row.nest_code || "unknown nest"}` });
+    if (!audited) {
+      await client.query("ROLLBACK");
+      return res.status(500).json({ error: "Could not record the deletion, so nothing was deleted." });
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Nest event deleted successfully",
+      deleted_nest_event: row
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Delete nest event error:", err);
+    res.status(500).json({ error: "Server error." });
+  } finally {
+    client.release();
+  }
+});
+
 app.post("/emergences", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { 
@@ -4002,7 +4145,7 @@ app.get("/emergences/:id", async (req, res) => {
 app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
-    const { distance_to_sea_s, gps_lat, gps_long, event_date, beach } = req.body;
+    const { distance_to_sea_s, gps_lat, gps_long, event_date, beach, track_sketch } = req.body;
 
     if (req.user.role === VOLUNTEER && !(await isOwnRecord("emergence", id, req.user.id))) {
       return res.status(403).json({ error: "You do not have permission to do that." });
@@ -4025,6 +4168,14 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    // Optional: a sketch is sent as base64 (a data: URL prefix is stripped).
+    // Absent or blank leaves the stored sketch as it is - this route never
+    // clears one.
+    const sketchInput = typeof track_sketch === "string" && track_sketch.trim() !== "" ? track_sketch.trim() : null;
+    const sketch = sketchInput
+      ? Buffer.from(sketchInput.startsWith("data:") ? sketchInput.slice(sketchInput.indexOf(",") + 1) : sketchInput, "base64")
+      : null;
+
     const result = await db.query(
       `UPDATE turtle_emergences
        SET distance_to_sea_s = COALESCE($1, distance_to_sea_s),
@@ -4032,6 +4183,7 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
            gps_long          = COALESCE($3, gps_long),
            event_date        = COALESCE($4, event_date),
            beach             = COALESCE($5, beach),
+           track_sketch      = COALESCE($7, track_sketch),
            updated_at        = NOW()
        WHERE id = $6
        RETURNING id, distance_to_sea_s, gps_lat, gps_long, event_date, beach;`,
@@ -4041,7 +4193,8 @@ app.put("/emergences/:id", requireRole(...RECORDERS), async (req, res) => {
         gps_long ?? null,
         event_date ?? null,
         beach ?? null,
-        id
+        id,
+        sketch
       ]
     );
 
@@ -5210,6 +5363,31 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
   try {
     const { id } = req.params;
     const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes, start_time, end_time } = req.body;
+
+    // A Field Volunteer may correct a survey only while it is sent back for
+    // correction: their own survey, and its review row currently 'rejected'.
+    // Ownership comes from record_reviews.submitted_by, the same column the
+    // review queue's resubmit route trusts - status and submitter sit on one
+    // row, and recordAudit can silently fail to write the 'created' entry that
+    // isOwnRecord relies on. No review row at all means no volunteer access.
+    // Field Leaders, Coordinators and Field Assistants are not gated here.
+    if (req.user.role === VOLUNTEER) {
+      const gate = await db.query(
+        `SELECT ms.id, r.status, r.submitted_by
+         FROM morning_surveys ms
+         LEFT JOIN record_reviews r ON r.record_type = 'morning_survey' AND r.record_id = ms.id
+         WHERE ms.id = $1 LIMIT 1;`,
+        [id]
+      );
+      if (gate.rows.length === 0) {
+        return res.status(404).json({ error: "Survey not found." });
+      }
+      const review = gate.rows[0];
+      const isOwn = review.submitted_by != null && String(review.submitted_by) === String(req.user.id);
+      if (!isOwn || review.status !== "rejected") {
+        return res.status(403).json({ error: "You do not have permission to do that." });
+      }
+    }
 
     const rangeError = outOfRange(req.body, MORNING_SURVEY_RANGES);
     if (rangeError) {
