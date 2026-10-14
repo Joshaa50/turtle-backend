@@ -3430,49 +3430,6 @@ app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, 
   }
 });
 
-// Void a turtle survey event (a re-sighting or encounter) entered in error.
-// Coordinator only, audited in the same transaction. The turtle itself is
-// untouched - it is not re-derived from the events it had.
-app.delete("/turtle_survey_events/:id", requireRole(COORDINATOR), async (req, res) => {
-  const { id } = req.params;
-  const client = await db.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const deleted = await client.query(
-      `DELETE FROM turtle_survey_events WHERE id = $1 RETURNING id, turtle_id, event_type, location;`,
-      [id]
-    );
-
-    if (deleted.rowCount === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Turtle survey event not found." });
-    }
-
-    // See the note in DELETE /nest-events/:id - an unaudited deletion is refused.
-    const row = deleted.rows[0];
-    const audited = await recordAudit(client, { recordType: "turtle_survey_event", recordId: row.id, action: "deleted", req,
-      summary: `${row.event_type || "Encounter"} of turtle ${row.turtle_id}${row.location ? ` at ${row.location}` : ""}` });
-    if (!audited) {
-      await client.query("ROLLBACK");
-      return res.status(500).json({ error: "Could not record the deletion, so nothing was deleted." });
-    }
-
-    await client.query("COMMIT");
-
-    res.json({
-      message: "Turtle survey event deleted successfully",
-      deleted_event: row
-    });
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    console.error("Delete turtle survey event error:", err);
-    res.status(500).json({ error: "Server error." });
-  } finally {
-    client.release();
-  }
-});
 
 // Creates a brand new turtle and its first encounter atomically (QA-027).
 // TaggingEntry's "New Turtle" flow used to be two separate requests: a
