@@ -6241,8 +6241,19 @@ const REVIEW_DETAIL_SQL = {
                   )) AS detail
            FROM turtles t WHERE t.id = ANY($1::int[]);`,
   // The survey plus everything it was linked to, which is most of the form.
+  // QA-125: to_jsonb(ms) converts tl_lat/tl_long/tr_lat/tr_long (plain
+  // numeric, no fixed scale) to JSON numbers, and Postgres's own jsonb
+  // conversion drops their trailing zeros (38.16090 -> 38.1609) - unlike the
+  // plain GET /morning-surveys/:id route, which returns the column's own
+  // stored text representation untouched. Casting to numeric(10,5) first
+  // forces that scale back before the ::text cast, so the review card shows
+  // the same 5 decimals the entry form and nest pages do.
   morning_survey: `SELECT ms.id,
                           (to_jsonb(ms) || jsonb_build_object(
+                            'tl_lat', (ms.tl_lat::numeric(10,5))::text,
+                            'tl_long', (ms.tl_long::numeric(10,5))::text,
+                            'tr_lat', (ms.tr_lat::numeric(10,5))::text,
+                            'tr_long', (ms.tr_long::numeric(10,5))::text,
                             'beach', b.name,
                             'survey_area', b.survey_area,
                             'linked_nests', COALESCE((
