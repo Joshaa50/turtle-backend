@@ -28,8 +28,15 @@ let query;
 
 beforeEach(() => {
   // Stubbed so the routes get past their own lookups and the only thing that
-  // could stop them is a role guard.
-  query = vi.spyOn(db, 'query').mockResolvedValue({ rows: [{ id: 28 }] });
+  // could stop them is a role guard. The link routes also check (QA-119) that
+  // the survey being linked to is this caller's own and not yet approved -
+  // stub record_audit/record_reviews as "her own survey 28, still pending" so
+  // that check passes and the role guard stays the only thing under test.
+  query = vi.spyOn(db, 'query').mockImplementation(async (sql) => {
+    if (/FROM record_audit WHERE record_type/i.test(sql)) return { rows: [{ actor_id: '51' }] };
+    if (/LEFT JOIN record_reviews/i.test(sql)) return { rows: [{ id: 28, status: 'pending' }] };
+    return { rows: [{ id: 28 }] };
+  });
   vi.spyOn(db, 'connect').mockResolvedValue({
     query: vi.fn().mockResolvedValue({ rows: [{ id: 28 }] }),
     release: vi.fn(),

@@ -493,7 +493,38 @@ const isOwnRecord = async (recordType, recordId, userId) => {
   }
 };
 
-
+// Attaching a nest or emergence to a survey happens both while a volunteer is
+// still building her own submission (survey status 'pending', or no review
+// row at all if this record type doesn't need one for her role) and later
+// while correcting a sent-back one ('rejected') - unlike PATCH, which is only
+// ever used for corrections, so it can require 'rejected' outright. What must
+// never happen is attaching to someone else's survey, or to one already
+// approved. Ownership comes from record_audit (isOwnRecord), not
+// record_reviews.submitted_by, since a role that needs no review for this
+// type never gets a review row to read ownership off of. Returns the survey
+// row on success, or null after writing an error response itself (404/403).
+const assertSurveyLinkable = async (id, user, res) => {
+  const gate = await db.query(
+    `SELECT ms.id, r.status
+     FROM morning_surveys ms
+     LEFT JOIN record_reviews r ON r.record_type = 'morning_survey' AND r.record_id = ms.id
+     WHERE ms.id = $1 LIMIT 1;`,
+    [id]
+  );
+  if (gate.rows.length === 0) {
+    res.status(404).json({ error: "Survey not found." });
+    return null;
+  }
+  if (user.role === VOLUNTEER || user.role === "Field Assistant") {
+    const survey = gate.rows[0];
+    const isOwn = await isOwnRecord("morning_survey", id, user.id);
+    if (!isOwn || survey.status === "approved") {
+      res.status(403).json({ error: "You do not have permission to do that." });
+      return null;
+    }
+  }
+  return gate.rows[0];
+};
 
 // The record types that can carry a review. Keyed by the table the id belongs
 // to, so a review row can be resolved back to the thing it describes.
@@ -2741,9 +2772,9 @@ const applyApprovalSideEffects = async (recordType, recordId, req) => {
            rear_left_address = COALESCE(NULLIF($7, ''), rear_left_address),
            rear_right_tag = COALESCE(NULLIF($8, ''), rear_right_tag),
            rear_right_address = COALESCE(NULLIF($9, ''), rear_right_address),
-           scl_max = $10, scl_min = $11, scw = $12,
-           ccl_max = $13, ccl_min = $14, ccw = $15,
-           tail_extension = $16, vent_to_tail_tip = $17, total_tail_length = $18,
+           scl_max = COALESCE($10, scl_max), scl_min = COALESCE($11, scl_min), scw = COALESCE($12, scw),
+           ccl_max = COALESCE($13, ccl_max), ccl_min = COALESCE($14, ccl_min), ccw = COALESCE($15, ccw),
+           tail_extension = COALESCE($16, tail_extension), vent_to_tail_tip = COALESCE($17, vent_to_tail_tip), total_tail_length = COALESCE($18, total_tail_length),
            updated_at = NOW()
          WHERE id = $19
          RETURNING name;`,
@@ -5874,14 +5905,9 @@ app.post("/morning-surveys/:id/nests", requireRole(...RECORDERS), async (req, re
       return res.status(400).json({ error: "nest_id is required." });
     }
 
-    // Confirm survey exists
-    const surveyResult = await db.query(
-      `SELECT id FROM morning_surveys WHERE id = $1 LIMIT 1;`,
-      [id]
-    );
-    if (surveyResult.rows.length === 0) {
-      return res.status(404).json({ error: "Survey not found." });
-    }
+    // Without this a Volunteer could attach a nest to someone else's survey,
+    // or to their own survey after it had already been approved.
+    if (!(await assertSurveyLinkable(id, req.user, res))) return;
 
     // Confirm nest exists
     const nestResult = await db.query(
@@ -5924,14 +5950,9 @@ app.post("/morning-surveys/:id/emergences", requireRole(...RECORDERS), async (re
       return res.status(400).json({ error: "emergence_id is required." });
     }
 
-    // Confirm survey exists
-    const surveyResult = await db.query(
-      `SELECT id FROM morning_surveys WHERE id = $1 LIMIT 1;`,
-      [id]
-    );
-    if (surveyResult.rows.length === 0) {
-      return res.status(404).json({ error: "Survey not found." });
-    }
+    // Without this a Volunteer could attach an emergence to someone else's
+    // survey, or to their own survey after it had already been approved.
+    if (!(await assertSurveyLinkable(id, req.user, res))) return;
 
     // Confirm emergence exists
     const emergenceResult = await db.query(

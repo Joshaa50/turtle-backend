@@ -14,7 +14,16 @@ const asVolunteer = (req) =>
 
 let query;
 beforeEach(() => {
-  query = vi.spyOn(db, 'query').mockResolvedValue({ rows: [{ id: 1 }] });
+  // QA-119: linking now checks the survey is this volunteer's own (via
+  // record_audit) and not already approved, before any of the folding logic
+  // below runs - stub those two lookups as "her own, still pending" so the
+  // rest of these tests exercise the folding behaviour they're about, not
+  // the gate.
+  query = vi.spyOn(db, 'query').mockImplementation(async (sql) => {
+    if (/FROM record_audit WHERE record_type/i.test(sql)) return { rows: [{ actor_id: '51' }] };
+    if (/LEFT JOIN record_reviews/i.test(sql)) return { rows: [{ id: 1, status: 'pending' }] };
+    return { rows: [{ id: 1 }] };
+  });
 });
 afterAll(() => db.end().catch(() => {}));
 
@@ -45,6 +54,8 @@ describe('folding survey children into the survey review', () => {
   it('still links the record when folding fails', async () => {
     query.mockImplementation(async (sql) => {
       if (String(sql).includes('DELETE FROM record_reviews')) throw new Error('boom');
+      if (/FROM record_audit WHERE record_type/i.test(sql)) return { rows: [{ actor_id: '51' }] };
+      if (/LEFT JOIN record_reviews/i.test(sql)) return { rows: [{ id: 1, status: 'pending' }] };
       return { rows: [{ id: 1 }] };
     });
     const res = await asVolunteer(request(app).post('/morning-surveys/7/emergences')).send({ emergence_id: 12 });
