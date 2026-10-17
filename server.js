@@ -5841,6 +5841,16 @@ app.post("/morning-surveys", requireRole(...RECORDERS), async (req, res) => {
       return res.status(400).json({ error: "Missing required survey metadata." });
     }
 
+    // QA-128: every other date field in the app (nest found, turtle
+    // sighting, nest event) already rejects a future date server-side;
+    // survey_date was the one gap, and the client's own future-time check
+    // only applies when the date is today, so a future date skipped it
+    // entirely.
+    const dateErr = futureDateError(survey_date, "Survey date");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
+    }
+
     const fieldError = await checkFieldRequirements("morning_survey", req.body);
     if (fieldError) {
       return res.status(400).json({ error: fieldError });
@@ -6043,7 +6053,7 @@ app.get("/morning-surveys/:id", async (req, res) => {
 app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
-    const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes, start_time, end_time } = req.body;
+    const { tl_lat, tl_long, tr_lat, tr_long, protected_nest_count, notes, start_time, end_time, survey_date } = req.body;
 
     // A Field Volunteer or Field Assistant may correct a survey only while it
     // is sent back for correction: their own survey, and its review row
@@ -6083,6 +6093,15 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
       return res.status(400).json({ error: "End time must be after start time." });
     }
 
+    // QA-129: this route silently ignored survey_date, so a reviewer asking
+    // for a date fix - the whole point of a send-back - could never actually
+    // get one; the PATCH returned 200 with nothing changed. Same future-date
+    // rule POST /morning-surveys itself now enforces (QA-128).
+    const dateErr = futureDateError(survey_date, "Survey date");
+    if (dateErr) {
+      return res.status(400).json({ error: dateErr });
+    }
+
     const result = await db.query(
       `UPDATE morning_surveys
        SET tl_lat               = COALESCE($1, tl_lat),
@@ -6092,8 +6111,9 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
            protected_nest_count = COALESCE($5, protected_nest_count),
            notes                = COALESCE($6, notes),
            start_time           = COALESCE($7, start_time),
-           end_time             = COALESCE($8, end_time)
-       WHERE id = $9
+           end_time             = COALESCE($8, end_time),
+           survey_date          = COALESCE($9, survey_date)
+       WHERE id = $10
        RETURNING *;`,
       [
         tl_lat != null ? parseFloat(tl_lat).toFixed(5) : null,
@@ -6104,6 +6124,7 @@ app.patch("/morning-surveys/:id", requireRole(...RECORDERS), async (req, res) =>
         notes ?? null,
         start_time || null,
         end_time || null,
+        survey_date || null,
         id,
       ]
     );
