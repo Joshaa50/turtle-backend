@@ -1845,6 +1845,7 @@ const insertTurtle = async (executor, body) => {
     scl_max, scl_min, scw,
     ccl_max, ccl_min, ccw,
     tail_extension, vent_to_tail_tip, total_tail_length,
+    microchip_number, microchip_location,
   } = body;
 
   sex = sex ? sex.toLowerCase() : "unknown";
@@ -1882,7 +1883,8 @@ const insertTurtle = async (executor, body) => {
       rear_right_tag, rear_right_address,
       scl_max, scl_min, scw,
       ccl_max, ccl_min, ccw,
-      tail_extension, vent_to_tail_tip, total_tail_length
+      tail_extension, vent_to_tail_tip, total_tail_length,
+      microchip_number, microchip_location
     )
     VALUES (
       $1, $2, $3, $4,
@@ -1892,7 +1894,8 @@ const insertTurtle = async (executor, body) => {
       $11, $12,
       $13, $14, $15,
       $16, $17, $18,
-      $19, $20, $21
+      $19, $20, $21,
+      $22, $23
     )
     RETURNING *;
   `;
@@ -1906,6 +1909,7 @@ const insertTurtle = async (executor, body) => {
     scl_max ?? null, scl_min ?? null, scw ?? null,
     ccl_max ?? null, ccl_min ?? null, ccw ?? null,
     tail_extension ?? null, vent_to_tail_tip ?? null, total_tail_length ?? null,
+    microchip_number || null, microchip_location || null,
   ]);
 
   return { row: result.rows[0] };
@@ -1982,6 +1986,26 @@ if (require.main === module) {
 // INTEGER, no FK - every cross-table id in this schema is a bare integer,
 // enforced at the app layer. Same boot-time, idempotent pattern as
 // turtles.is_archived above; no backfill, this only applies going forward.
+// QA-133: microchip_number/microchip_location were already collected by the
+// Tag a Turtle form and sent to the API, but neither column existed on
+// turtles or turtle_survey_events, so insertTurtle/insertTurtleSurveyEvent
+// silently dropped them before any SQL ran - the save succeeded (201) but
+// the chip number was never stored. Same boot-time, idempotent pattern as
+// turtles.is_archived above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtles ADD COLUMN IF NOT EXISTS microchip_number TEXT;`);
+      await db.query(`ALTER TABLE turtles ADD COLUMN IF NOT EXISTS microchip_location TEXT;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS microchip_number TEXT;`);
+      await db.query(`ALTER TABLE turtle_survey_events ADD COLUMN IF NOT EXISTS microchip_location TEXT;`);
+      console.log("turtles/turtle_survey_events microchip columns are present.");
+    } catch (err) {
+      console.error("Could not ensure microchip columns:", err.message);
+    }
+  })();
+}
+
 if (require.main === module) {
   (async () => {
     try {
@@ -3362,6 +3386,7 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     health_condition, observer, notes,
     time_first_seen, time_start_egg_laying, time_covering,
     time_end_camouflage, time_reach_sea,
+    microchip_number, microchip_location,
   } = body;
 
   const requiredFields = [
@@ -3397,13 +3422,15 @@ const insertTurtleSurveyEvent = async (executor, body) => {
       tail_extension, vent_to_tail_tip, total_tail_length,
       health_condition, observer, notes,
       time_first_seen, time_start_egg_laying, time_covering,
-      time_end_camouflage, time_reach_sea
+      time_end_camouflage, time_reach_sea,
+      microchip_number, microchip_location
     )
     VALUES (
       $1,$2,$3,$4,
       $5,$6,$7,$8,$9,$10,$11,$12,
       $13,$14,$15,$16,$17,$18,$19,$20,$21,
-      $22,$23,$24,$25,$26,$27,$28,$29
+      $22,$23,$24,$25,$26,$27,$28,$29,
+      $30,$31
     )
     RETURNING *;
   `;
@@ -3420,6 +3447,7 @@ const insertTurtleSurveyEvent = async (executor, body) => {
     health_condition, observer, notes || null,
     time_first_seen || null, time_start_egg_laying || null, time_covering || null,
     time_end_camouflage || null, time_reach_sea || null,
+    microchip_number || null, microchip_location || null,
   ];
 
   const result = await executor.query(sql, values);
