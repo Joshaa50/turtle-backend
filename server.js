@@ -3925,6 +3925,18 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
       } catch (err) {
         console.error(`Could not sync emergence ${result.rows[0].emergence_id} GPS after nest ${id} update:`, err.message);
       }
+
+      // QA-139: same gap as QA-101 above, but for date_found - correcting a
+      // nest's date (added by QA-132) left its 1:1 emergence row's event_date
+      // stale, so the Emergences tab kept showing the nesting on the old night.
+      try {
+        await db.query(
+          `UPDATE turtle_emergences SET event_date = $1 WHERE id = $2;`,
+          [date_found, result.rows[0].emergence_id]
+        );
+      } catch (err) {
+        console.error(`Could not sync emergence ${result.rows[0].emergence_id} event_date after nest ${id} update:`, err.message);
+      }
     }
 
     const changes = describeNestChanges(before.rows[0], result.rows[0]);
