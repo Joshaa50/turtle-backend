@@ -372,6 +372,23 @@ const EMERGED_SO_FAR_SQL = `
    FROM turtle_nest_events e
    WHERE e.nest_id = n.id AND e.event_type IN ('EMERGENCE', 'HATCHING')`;
 
+// QA-142: fields a nest edit can change that aren't dramatic enough to get
+// their own line above (status/relocation/clutch/beach/archiving/code), but
+// still matter enough that "details edited" twice in a row for two different
+// edits - or an edit that reverts itself - was indistinguishable. A changed
+// lay date or GPS position shifts hatch windows and maps, so it's worth a
+// name a reviewer recognises rather than the raw column.
+const NEST_CHANGE_FIELD_LABELS = {
+  date_found: "Date found",
+  current_num_eggs: "Current eggs",
+  depth_top_egg_h: "Depth to top egg (h)",
+  depth_bottom_chamber_h: "Depth to chamber (H)",
+  width_w: "Width (w)",
+  distance_to_sea_s: "Distance to sea (S)",
+  gps_lat: "Latitude",
+  gps_long: "Longitude",
+};
+
 // One line saying what a save actually changed on a nest. Only the fields that
 // matter to a nest's story are compared - status, relocation, clutch, beach,
 // archiving - so a routine save does not fill the history with noise.
@@ -389,6 +406,13 @@ const describeNestChanges = (prev, next) => {
   if (!prev.is_archived && next.is_archived) { parts.push("Archived"); out.archived = true; }
   if (prev.is_archived && !next.is_archived) { parts.push("Restored from archive"); out.restored = true; }
   if (prev.nest_code !== next.nest_code) parts.push(`Code ${prev.nest_code} → ${next.nest_code}`);
+
+  for (const [field, label] of Object.entries(NEST_CHANGE_FIELD_LABELS)) {
+    if (!(field in prev) || !(field in next)) continue;
+    if (String(prev[field] ?? "") !== String(next[field] ?? "")) {
+      parts.push(`${label} ${prev[field] ?? "unset"} → ${next[field] ?? "unset"}`);
+    }
+  }
 
   out.text = parts.length > 0 ? parts.join("; ") : `Nest ${next.nest_code} details edited`;
   return out;
@@ -3823,9 +3847,14 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
 
     // What the nest looked like before, so the history can say what changed
     // (a status moving to hatching, a relocation, a corrected clutch) rather
-    // than just that somebody saved it.
+    // than just that somebody saved it. Widened for QA-142 to cover every
+    // field NEST_CHANGE_FIELD_LABELS can name - describeNestChanges skips a
+    // field it can't find on `before`, so a column missing here silently
+    // falls back to "details edited" for that field, same as before this fix.
     const before = await db.query(
-      "SELECT nest_code, status, relocated, beach, total_num_eggs, current_num_eggs, is_archived FROM turtle_nests WHERE id = $1 LIMIT 1;",
+      `SELECT nest_code, status, relocated, beach, total_num_eggs, current_num_eggs, is_archived,
+        date_found, depth_top_egg_h, depth_bottom_chamber_h, width_w, distance_to_sea_s, gps_lat, gps_long
+       FROM turtle_nests WHERE id = $1 LIMIT 1;`,
       [id]
     );
 
