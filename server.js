@@ -389,6 +389,19 @@ const NEST_CHANGE_FIELD_LABELS = {
   gps_long: "Longitude",
 };
 
+// QA-144: date_found comes back from the db as a plain ISO "YYYY-MM-DD"
+// string, but every other date shown to staff (siteDetails, CSVs, etc.) uses
+// the app's dd/mm/yyyy convention - the audit line was the one place still
+// leaking the raw ISO value. Only touches well-formed "YYYY-MM-DD" input;
+// anything else (null, already dd/mm/yyyy, garbage) is returned unchanged
+// rather than risk mangling it.
+const formatDdMmYyyy = (value) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value ?? ""));
+  if (!match) return value;
+  const [, year, month, day] = match;
+  return `${day}/${month}/${year}`;
+};
+
 // One line saying what a save actually changed on a nest. Only the fields that
 // matter to a nest's story are compared - status, relocation, clutch, beach,
 // archiving - so a routine save does not fill the history with noise.
@@ -410,8 +423,17 @@ const describeNestChanges = (prev, next) => {
   for (const [field, label] of Object.entries(NEST_CHANGE_FIELD_LABELS)) {
     if (!(field in prev) || !(field in next)) continue;
     if (String(prev[field] ?? "") !== String(next[field] ?? "")) {
-      parts.push(`${label} ${prev[field] ?? "unset"} → ${next[field] ?? "unset"}`);
+      const format = field === "date_found" ? formatDdMmYyyy : (v) => v;
+      const prevVal = prev[field] != null ? format(prev[field]) : "unset";
+      const nextVal = next[field] != null ? format(next[field]) : "unset";
+      parts.push(`${label} ${prevVal} → ${nextVal}`);
     }
+  }
+
+  // QA-144: notes is free text and can be long, so the audit line only flags
+  // that it changed rather than quoting the before/after text in full.
+  if ("notes" in prev && "notes" in next && (prev.notes ?? "") !== (next.notes ?? "")) {
+    parts.push("Notes updated");
   }
 
   out.text = parts.length > 0 ? parts.join("; ") : `Nest ${next.nest_code} details edited`;
@@ -2038,6 +2060,24 @@ if (require.main === module) {
       console.log("turtle_nest_events.survey_id is present.");
     } catch (err) {
       console.error("Could not ensure turtle_nest_events.survey_id:", err.message);
+    }
+  })();
+}
+
+// QA-145: "Incubation (final)" was computed to the excavation/inventory date
+// (turtle_nest_events.event_type LIKE INVENTORY, aliased hatched_at in GET
+// /nests), which can trail the actual first hatchling emergence by however
+// many days the team waited before digging. first_emergence_at is set once,
+// from the earliest EMERGENCE/HATCHING event ever recorded for a nest (see
+// POST /nest-events/create), and never overwritten by a later one. Same
+// boot-time, idempotent pattern as turtles.is_archived above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query(`ALTER TABLE turtle_nests ADD COLUMN IF NOT EXISTS first_emergence_at TIMESTAMPTZ;`);
+      console.log("turtle_nests.first_emergence_at is present.");
+    } catch (err) {
+      console.error("Could not ensure turtle_nests.first_emergence_at:", err.message);
     }
   })();
 }
@@ -3853,7 +3893,7 @@ app.put("/nests/:id/update", requireRole(COORDINATOR, LEADER, "Field Assistant")
     // falls back to "details edited" for that field, same as before this fix.
     const before = await db.query(
       `SELECT nest_code, status, relocated, beach, total_num_eggs, current_num_eggs, is_archived,
-        date_found, depth_top_egg_h, depth_bottom_chamber_h, width_w, distance_to_sea_s, gps_lat, gps_long
+        date_found, depth_top_egg_h, depth_bottom_chamber_h, width_w, distance_to_sea_s, gps_lat, gps_long, notes
        FROM turtle_nests WHERE id = $1 LIMIT 1;`,
       [id]
     );
@@ -4097,7 +4137,7 @@ app.get("/nests", async (req, res) => {
         n.tri_tl_desc, n.tri_tl_lat, n.tri_tl_long, n.tri_tl_distance,
         n.tri_tr_desc, n.tri_tr_lat, n.tri_tr_long, n.tri_tr_distance,
         n.status, n.relocated, n.is_archived, n.date_found, n.beach, n.notes,
-        n.created_at, n.updated_at, x.hatched_at
+        n.created_at, n.updated_at, n.first_emergence_at, x.hatched_at
       FROM turtle_nests n
       LEFT JOIN excavation x ON x.nest_code = n.nest_code
       ORDER BY n.date_found DESC, n.id DESC;
@@ -4327,6 +4367,17 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     ];
 
     const result = await db.query(sql, values);
+    // QA-145: only the first EMERGENCE/HATCHING event ever recorded for this
+    // nest should set its incubation end date - COALESCE leaves an existing
+    // value untouched so a later emergence sighting can never push it back.
+    if (event_type === "EMERGENCE" || event_type === "HATCHING") {
+      await db.query(
+        `UPDATE turtle_nests
+         SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2, $3))
+         WHERE id = $1;`,
+        [nest_id, start_time || null, result.rows[0]?.created_at || null]
+      );
+    }
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
     // QA-090: when this submitter's role does not require review for
     // nest_event (the default for everyone except Field Volunteer),
@@ -5847,6 +5898,29 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
   } catch (err) {
     console.error("Get audit trail error:", err);
     res.status(500).json({ error: "Server error while fetching the audit trail." });
+  }
+});
+
+// QA-147: the Dashboard's Recent Activity feed only pulled from the nests,
+// emergences, turtles and reviews endpoints, so nest inventories/hatching
+// events and turtle re-sightings - often the day's biggest news - never
+// showed up. Rather than teach the Dashboard four more queries, it reuses
+// the audit trail's own human-readable summaries. Open to every authenticated
+// role (not REVIEWERS-only like the single-record route above) because every
+// role sees the Dashboard.
+app.get("/audit/recent", async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT record_type, record_id, action, summary, occurred_at
+       FROM record_audit
+       WHERE record_type IN ('nest_event', 'turtle_survey_event')
+       ORDER BY occurred_at DESC
+       LIMIT 20;`
+    );
+    res.json({ entries: result.rows });
+  } catch (err) {
+    console.error("Get recent audit entries error:", err);
+    res.status(500).json({ error: "Server error while fetching recent activity." });
   }
 });
 

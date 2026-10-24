@@ -70,7 +70,7 @@ describe('PUT /nests/:id/update records what actually changed (QA-142)', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(summary).toBe('Date found 2026-10-20 → 2026-10-19');
+    expect(summary).toBe('Date found 20/10/2026 → 19/10/2026');
   });
 
   it('distinguishes a date correction from its own later revert, instead of two identical "details edited" lines', async () => {
@@ -87,8 +87,8 @@ describe('PUT /nests/:id/update records what actually changed (QA-142)', () => {
     });
 
     expect(forwardSummary).not.toBe(revertSummary);
-    expect(forwardSummary).toBe('Date found 2026-10-20 → 2026-10-19');
-    expect(revertSummary).toBe('Date found 2026-10-19 → 2026-10-20');
+    expect(forwardSummary).toBe('Date found 20/10/2026 → 19/10/2026');
+    expect(revertSummary).toBe('Date found 19/10/2026 → 20/10/2026');
   });
 
   it('still falls back to "details edited" when nothing in the diffed fields actually changed', async () => {
