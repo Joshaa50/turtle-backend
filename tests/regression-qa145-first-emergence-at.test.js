@@ -102,7 +102,7 @@ describe('POST /nest-events/create sets turtle_nests.first_emergence_at (QA-145)
     // whether a row already has a value - the DB, not the app, decides
     // whether anything actually changes.
     expect(updates).toHaveLength(1);
-    expect(String(updates[0][0])).toContain('COALESCE(first_emergence_at, COALESCE($2, $3))');
+    expect(String(updates[0][0])).toContain('COALESCE(first_emergence_at, COALESCE($2::timestamptz, $3::timestamptz))');
   });
 
   // Found via a real failure: the event row above is already committed by

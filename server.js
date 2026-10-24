@@ -4376,9 +4376,14 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     // on PUT /nests/:id/update (search "Could not sync emergence").
     if (event_type === "EMERGENCE" || event_type === "HATCHING") {
       try {
+        // $2/$3 are both plain parameters with nothing else in this inner
+        // COALESCE to anchor a type to - Postgres can't infer one and
+        // rejects the query ("could not determine data type of parameter")
+        // without an explicit cast, even though the outer COALESCE's result
+        // is unambiguously assigned to a timestamptz column.
         await db.query(
           `UPDATE turtle_nests
-           SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2, $3))
+           SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2::timestamptz, $3::timestamptz))
            WHERE id = $1;`,
           [nest_id, start_time || null, result.rows[0]?.created_at || null]
         );
