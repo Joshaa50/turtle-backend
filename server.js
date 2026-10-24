@@ -4370,13 +4370,21 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
     // QA-145: only the first EMERGENCE/HATCHING event ever recorded for this
     // nest should set its incubation end date - COALESCE leaves an existing
     // value untouched so a later emergence sighting can never push it back.
+    // The event row above is already committed by this point, so a failure
+    // here (e.g. a schema migration mid-deploy) must not turn an otherwise
+    // successful save into a 500 - same posture as the GPS/date_found syncs
+    // on PUT /nests/:id/update (search "Could not sync emergence").
     if (event_type === "EMERGENCE" || event_type === "HATCHING") {
-      await db.query(
-        `UPDATE turtle_nests
-         SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2, $3))
-         WHERE id = $1;`,
-        [nest_id, start_time || null, result.rows[0]?.created_at || null]
-      );
+      try {
+        await db.query(
+          `UPDATE turtle_nests
+           SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2, $3))
+           WHERE id = $1;`,
+          [nest_id, start_time || null, result.rows[0]?.created_at || null]
+        );
+      } catch (err) {
+        console.error(`Could not set first_emergence_at for nest ${nest_id}:`, err.message);
+      }
     }
     const review = await queueReviewSafely("nest_event", result.rows[0]?.id, req);
     // QA-090: when this submitter's role does not require review for

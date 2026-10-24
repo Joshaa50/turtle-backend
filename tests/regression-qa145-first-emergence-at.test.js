@@ -105,6 +105,34 @@ describe('POST /nest-events/create sets turtle_nests.first_emergence_at (QA-145)
     expect(String(updates[0][0])).toContain('COALESCE(first_emergence_at, COALESCE($2, $3))');
   });
 
+  // Found via a real failure: the event row above is already committed by
+  // the time this UPDATE runs, so a failure here (e.g. a schema migration
+  // mid-deploy, before the first_emergence_at column exists yet) must not
+  // turn an otherwise-successful save into a 500 - the client would see a
+  // failure for a track that was, in fact, recorded.
+  it('still returns 200 and keeps the event when the first_emergence_at update itself fails', async () => {
+    const query = vi.spyOn(db, 'query').mockImplementation(async (sql) => {
+      const text = String(sql);
+      if (text.includes('SELECT n.id, n.date_found, n.total_num_eggs')) {
+        return { rows: [{ id: 90, total_num_eggs: 100, emerged_so_far: 0 }] };
+      }
+      if (text.includes('INSERT INTO turtle_nest_events')) {
+        return { rows: [nestEventRow()] };
+      }
+      if (text.includes('SET first_emergence_at')) {
+        throw new Error('column "first_emergence_at" does not exist');
+      }
+      return { rows: [] };
+    });
+
+    const res = await asVolunteer(request(app).post('/nest-events/create')).send({
+      event_type: 'EMERGENCE', nest_code: 'LG2-9', tracks_to_sea: 1, tracks_lost: 0,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.event).toBeTruthy();
+  });
+
   it('does not touch first_emergence_at for a non-emergence event type', async () => {
     const query = vi.spyOn(db, 'query').mockImplementation(async (sql) => {
       const text = String(sql);
