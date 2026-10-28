@@ -2071,6 +2071,33 @@ if (require.main === module) {
 // from the earliest EMERGENCE/HATCHING event ever recorded for a nest (see
 // POST /nest-events/create), and never overwritten by a later one. Same
 // boot-time, idempotent pattern as turtles.is_archived above.
+// QA-145 backfill: nests whose EMERGENCE/HATCHING events were recorded
+// before the column (and the COALESCE-guarded update in POST
+// /nest-events/create) existed still have first_emergence_at = null. This
+// fills those from the earliest EMERGENCE/HATCHING event ever recorded for
+// each nest - same start_time-then-created_at preference as the live-event
+// code above. It only ever touches rows where first_emergence_at IS NULL,
+// so it is naturally idempotent and safe to run on every boot.
+async function backfillFirstEmergenceAt() {
+  try {
+    await db.query(
+      `UPDATE turtle_nests n
+       SET first_emergence_at = e.first_emergence_at
+       FROM (
+         SELECT DISTINCT ON (nest_id)
+           nest_id, COALESCE(start_time, created_at) AS first_emergence_at
+         FROM turtle_nest_events
+         WHERE event_type IN ('EMERGENCE', 'HATCHING')
+         ORDER BY nest_id, COALESCE(start_time, created_at) ASC
+       ) e
+       WHERE e.nest_id = n.id AND n.first_emergence_at IS NULL;`
+    );
+    console.log("Backfilled turtle_nests.first_emergence_at from existing EMERGENCE/HATCHING events.");
+  } catch (err) {
+    console.error("Could not backfill turtle_nests.first_emergence_at:", err.message);
+  }
+}
+
 if (require.main === module) {
   (async () => {
     try {
@@ -2079,6 +2106,7 @@ if (require.main === module) {
     } catch (err) {
       console.error("Could not ensure turtle_nests.first_emergence_at:", err.message);
     }
+    await backfillFirstEmergenceAt();
   })();
 }
 
@@ -7086,4 +7114,4 @@ if (require.main === module) {
 
 // `db` is exported so tests can stub `db.query` on the pool instance rather
 // than mocking the pg module - the pool never connects if it is never queried.
-module.exports = { app, db, signToken };
+module.exports = { app, db, signToken, backfillFirstEmergenceAt };
