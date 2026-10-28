@@ -6971,6 +6971,26 @@ app.post("/alerts/:id/acknowledge", async (req, res) => {
   }
 });
 
+// "Mark all as read" has to clear every acknowledgeable alert the user has,
+// not just the ones the panel happened to have loaded (it paginates) - so this
+// is one UPDATE over everything matching, not a loop over client-supplied ids.
+app.post("/alerts/acknowledge-all", async (req, res) => {
+  try {
+    const result = await db.query(
+      `UPDATE record_reviews
+       SET acknowledged_at = NOW(), acknowledged_by = $1
+       WHERE status IN ('approved', 'rejected') AND acknowledged_at IS NULL
+         AND (submitted_by = $1 OR $2::boolean)
+       RETURNING id;`,
+      [req.user.id, REVIEWERS.includes(req.user.role)]
+    );
+    res.json({ message: "Alerts cleared.", count: result.rows.length });
+  } catch (err) {
+    console.error("Acknowledge all alerts error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
 app.post("/ai/nest-query", async (req, res) => {
   try {
     const { query, nests } = req.body;

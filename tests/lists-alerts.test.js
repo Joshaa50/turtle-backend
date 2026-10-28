@@ -260,9 +260,33 @@ describe('alerts', () => {
     expect((await asVolunteer(request(app).post('/alerts/banana/acknowledge'))).status).toBe(400);
   });
 
+  // QA-153: "Mark all as read" must clear every unread alert in one query, not
+  // just whatever the panel happened to have loaded - a per-id loop driven by
+  // the client leaves anything not currently rendered unacknowledged.
+  it('acknowledges everything in a single query, scoped to the user (QA-153)', async () => {
+    query.mockImplementation(async (sql) =>
+      String(sql).includes('SET acknowledged_at') ? { rows: [{ id: 5 }, { id: 6 }, { id: 9 }] } : { rows: [] });
+    const res = await asVolunteer(request(app).post('/alerts/acknowledge-all'));
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(3);
+    const calls = query.mock.calls.filter(([sql]) => String(sql).includes('SET acknowledged_at'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).not.toMatch(/WHERE id = /);
+    expect(calls[0][1]).toEqual(['51', false]);
+  });
+
+  it('lets a reviewer acknowledge-all on behalf of the team (shared)', async () => {
+    query.mockImplementation(async (sql) =>
+      String(sql).includes('SET acknowledged_at') ? { rows: [{ id: 5 }] } : { rows: [] });
+    await asLeader(request(app).post('/alerts/acknowledge-all'));
+    const call = query.mock.calls.find(([sql]) => String(sql).includes('SET acknowledged_at'));
+    expect(call[1]).toEqual(['7', true]);
+  });
+
   it('needs a token', async () => {
     expect((await request(app).get('/alerts')).status).toBe(401);
     expect((await request(app).post('/alerts/5/acknowledge')).status).toBe(401);
+    expect((await request(app).post('/alerts/acknowledge-all')).status).toBe(401);
   });
 
   it('groups a bulk-approved multi-beach morning survey walk into one alert (QA-059)', async () => {
