@@ -55,7 +55,7 @@ describe('turtle profile updates go through review, not the sighting save (QA-09
       const text = String(sql);
       calls.push({ text, params });
 
-      if (text.includes('SELECT id FROM turtles WHERE id = $1')) {
+      if (text.includes('SELECT id, name FROM turtles WHERE id = $1')) {
         return Promise.resolve({ rows: [{ id: 56 }] });
       }
       if (text.includes('INSERT INTO turtle_survey_events')) {
@@ -86,7 +86,7 @@ describe('turtle profile updates go through review, not the sighting save (QA-09
       const text = String(sql);
       calls.push({ text, params });
 
-      if (text.includes('SELECT id FROM turtles WHERE id = $1')) {
+      if (text.includes('SELECT id, name FROM turtles WHERE id = $1')) {
         return Promise.resolve({ rows: [{ id: 56 }] });
       }
       if (text.includes('INSERT INTO turtle_survey_events')) {

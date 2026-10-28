@@ -41,6 +41,10 @@ describe('GET /audit/recent (QA-147)', () => {
     expect(String(sql)).toMatch(/record_type IN \('nest_event', 'turtle_survey_event'\)/);
     expect(String(sql)).toMatch(/ORDER BY occurred_at DESC/);
     expect(String(sql)).toMatch(/LIMIT 20/);
+    // QA-150: deleted-record audit trail entries and rows whose underlying
+    // event has since been deleted are excluded from this feed.
+    expect(String(sql)).toMatch(/action != 'deleted'/);
+    expect(String(sql)).toMatch(/EXISTS/);
   });
 
   it('requires authentication, like every other non-public route', async () => {

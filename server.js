@@ -3549,14 +3549,16 @@ const insertTurtleSurveyEvent = async (executor, body) => {
 app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { turtle_id } = req.body;
+    let turtleName = null;
     if (turtle_id !== undefined && turtle_id !== null) {
       if (!/^\d+$/.test(String(turtle_id))) {
         return res.status(400).json({ error: "turtle_id must be a number." });
       }
-      const turtleCheck = await db.query(`SELECT id FROM turtles WHERE id = $1;`, [turtle_id]);
+      const turtleCheck = await db.query(`SELECT id, name FROM turtles WHERE id = $1;`, [turtle_id]);
       if (turtleCheck.rows.length === 0) {
         return res.status(404).json({ error: "Turtle not found." });
       }
+      turtleName = turtleCheck.rows[0].name;
     }
 
     const { error, row } = await insertTurtleSurveyEvent(db, req.body);
@@ -3578,7 +3580,9 @@ app.post("/turtle_survey_events/create", requireRole(...RECORDERS), async (req, 
       recordId: row.id,
       action: "created",
       req,
-      summary: `${req.body.event_type || "Encounter"} of turtle ${req.body.turtle_id}${req.body.location ? ` at ${req.body.location}` : ""}`,
+      // QA-150: this used to read "turtle 47" - the raw database id - instead
+      // of a name a reviewer would recognise.
+      summary: `${req.body.event_type || "Encounter"} of ${turtleName ? `"${turtleName}"` : `turtle ${req.body.turtle_id}`}${req.body.location ? ` at ${req.body.location}` : ""}`,
     });
 
     res.json({
@@ -3632,7 +3636,8 @@ app.post("/turtles/create-with-event", requireRole(...RECORDERS), async (req, re
       summary: turtle.name ? `Turtle "${turtle.name}"` : null });
     await recordAudit(db, {
       recordType: "turtle_survey_event", recordId: event.id, action: "created", req,
-      summary: `${req.body.event_type || "Encounter"} of turtle ${turtle.id}${req.body.location ? ` at ${req.body.location}` : ""}`,
+      // QA-150: name over raw id, same as the standalone route above.
+      summary: `${req.body.event_type || "Encounter"} of ${turtle.name ? `"${turtle.name}"` : `turtle ${turtle.id}`}${req.body.location ? ` at ${req.body.location}` : ""}`,
     });
 
     res.json({
@@ -5951,10 +5956,29 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
 // role sees the Dashboard.
 app.get("/audit/recent", async (req, res) => {
   try {
+    // QA-150: two ways a row here stopped being real "recent activity".
+    // 1) action = 'deleted' is the audit trail for a deletion, not a new
+    //    event - including it made a deletion look like fresh activity.
+    // 2) record_audit is append-only (see its header comment) and outlives
+    //    the record it describes, so deleting a nest's events (or a turtle's
+    //    survey events) leaves their 'created' rows behind with nothing for
+    //    them to point at any more. NOT EXISTS against each event table by
+    //    its own id drops those stale rows without needing to know why the
+    //    parent record is gone.
     const result = await db.query(
       `SELECT record_type, record_id, action, summary, occurred_at
-       FROM record_audit
-       WHERE record_type IN ('nest_event', 'turtle_survey_event')
+       FROM record_audit a
+       WHERE a.record_type IN ('nest_event', 'turtle_survey_event')
+         AND a.action != 'deleted'
+         AND (
+           (a.record_type = 'nest_event' AND EXISTS (
+             SELECT 1 FROM turtle_nest_events e WHERE e.id = a.record_id
+           ))
+           OR
+           (a.record_type = 'turtle_survey_event' AND EXISTS (
+             SELECT 1 FROM turtle_survey_events e WHERE e.id = a.record_id
+           ))
+         )
        ORDER BY occurred_at DESC
        LIMIT 20;`
     );

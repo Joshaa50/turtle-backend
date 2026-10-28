@@ -17,7 +17,7 @@ const token = jwt.sign({ sub: '49', role: 'Field Leader', email: 'x@turtleguard.
 let query;
 beforeEach(() => {
   query = vi.spyOn(db, 'query').mockImplementation(async (sql, params) => {
-    if (/SELECT id FROM turtles WHERE id/i.test(sql)) return { rows: [{ id: 48 }], rowCount: 1 };
+    if (/FROM turtles WHERE id/i.test(sql)) return { rows: [{ id: 48, name: null }], rowCount: 1 };
     if (/INSERT INTO turtle_survey_events/i.test(sql)) {
       return { rows: [{ id: 999, tail_extension: null, vent_to_tail_tip: null, total_tail_length: null }], rowCount: 1 };
     }
