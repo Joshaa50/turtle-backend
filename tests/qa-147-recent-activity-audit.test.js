@@ -21,12 +21,19 @@ const auth = (req) => req.set('Authorization', `Bearer ${volunteerToken}`);
 afterAll(() => db.end().catch(() => {}));
 
 describe('GET /audit/recent (QA-147)', () => {
-  it('returns only nest_event and turtle_survey_event rows, newest first, using their own summaries', async () => {
+  it('returns only nest_event and turtle_survey_event rows, newest first, summary rebuilt from the join', async () => {
+    // QA-150: the route now joins turtle_survey_events/turtle_nest_events
+    // (and turtles/turtle_nests) at read time, so the rows the mocked pool
+    // returns carry those joined columns rather than a ready-made summary.
     const rows = [
-      { record_type: 'turtle_survey_event', record_id: 7, action: 'created',
-        summary: 'Re-sighted turtle TG-4021 at Loggos 2', occurred_at: '2026-10-24T06:10:00.000Z' },
-      { record_type: 'nest_event', record_id: 3, action: 'created',
-        summary: 'Full inventory recorded: 98 hatched, 2 unhatched', occurred_at: '2026-10-24T05:50:00.000Z' },
+      { record_type: 'turtle_survey_event', record_id: 7, action: 'created', stored_summary: 'stale text',
+        occurred_at: '2026-10-24T06:10:00.000Z', tse_event_type: 'RE-SIGHTING', tse_turtle_id: 21,
+        tse_location: 'Loggos 2', turtle_name: 'TG-4021', ne_event_type: null, ne_hatched_count: null,
+        ne_total_eggs: null, ne_tracks_to_sea: null, ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null },
+      { record_type: 'nest_event', record_id: 3, action: 'created', stored_summary: 'stale text',
+        occurred_at: '2026-10-24T05:50:00.000Z', tse_event_type: null, tse_turtle_id: null, tse_location: null,
+        turtle_name: null, ne_event_type: 'INVENTORY', ne_hatched_count: 98, ne_total_eggs: 100,
+        ne_tracks_to_sea: null, ne_tracks_lost: null, ne_stored_nest_code: 'VA-3', nest_code: 'VA-3' },
     ];
     const spy = vi.spyOn(db, 'query').mockResolvedValue({ rows });
 
@@ -35,7 +42,12 @@ describe('GET /audit/recent (QA-147)', () => {
     const res = await auth(request(app).get('/audit/recent'));
 
     expect(res.status).toBe(200);
-    expect(res.body.entries).toEqual(rows);
+    expect(res.body.entries).toEqual([
+      { record_type: 'turtle_survey_event', record_id: 7, action: 'created',
+        summary: 'RE-SIGHTING of "TG-4021" at Loggos 2', occurred_at: '2026-10-24T06:10:00.000Z' },
+      { record_type: 'nest_event', record_id: 3, action: 'created',
+        summary: 'Inventory recorded: 98 hatched of 100 eggs (VA-3)', occurred_at: '2026-10-24T05:50:00.000Z' },
+    ]);
 
     const [sql] = spy.mock.calls[0];
     expect(String(sql)).toMatch(/record_type IN \('nest_event', 'turtle_survey_event'\)/);
@@ -44,7 +56,8 @@ describe('GET /audit/recent (QA-147)', () => {
     // QA-150: deleted-record audit trail entries and rows whose underlying
     // event has since been deleted are excluded from this feed.
     expect(String(sql)).toMatch(/action != 'deleted'/);
-    expect(String(sql)).toMatch(/EXISTS/);
+    expect(String(sql)).toMatch(/LEFT JOIN turtle_survey_events/);
+    expect(String(sql)).toMatch(/LEFT JOIN turtle_nest_events/);
   });
 
   it('requires authentication, like every other non-public route', async () => {

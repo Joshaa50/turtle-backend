@@ -5990,7 +5990,7 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
 // role sees the Dashboard.
 app.get("/audit/recent", async (req, res) => {
   try {
-    // QA-150: two ways a row here stopped being real "recent activity".
+    // QA-150: three ways a row here stopped being real "recent activity".
     // 1) action = 'deleted' is the audit trail for a deletion, not a new
     //    event - including it made a deletion look like fresh activity.
     // 2) record_audit is append-only (see its header comment) and outlives
@@ -5999,24 +5999,62 @@ app.get("/audit/recent", async (req, res) => {
     //    them to point at any more. NOT EXISTS against each event table by
     //    its own id drops those stale rows without needing to know why the
     //    parent record is gone.
+    // 3) `summary` is text frozen at write time, so a row written before a
+    //    wording fix (or before a turtle/nest was renamed) keeps showing the
+    //    old text forever - a stored column can't retroactively fix itself.
+    //    Joining to the turtle/nest here and rebuilding the name/code portion
+    //    below fixes both already-stored rows and future renames, without a
+    //    backfill migration.
     const result = await db.query(
-      `SELECT record_type, record_id, action, summary, occurred_at
+      `SELECT a.record_type, a.record_id, a.action, a.summary AS stored_summary, a.occurred_at,
+              tse.event_type AS tse_event_type, tse.turtle_id AS tse_turtle_id, tse.location AS tse_location,
+              t.name AS turtle_name,
+              ne.event_type AS ne_event_type, ne.hatched_count AS ne_hatched_count,
+              ne.total_eggs AS ne_total_eggs, ne.tracks_to_sea AS ne_tracks_to_sea,
+              ne.tracks_lost AS ne_tracks_lost, ne.nest_code AS ne_stored_nest_code,
+              tn.nest_code AS nest_code
        FROM record_audit a
+       LEFT JOIN turtle_survey_events tse ON a.record_type = 'turtle_survey_event' AND tse.id = a.record_id
+       LEFT JOIN turtles t ON t.id = tse.turtle_id
+       LEFT JOIN turtle_nest_events ne ON a.record_type = 'nest_event' AND ne.id = a.record_id
+       LEFT JOIN turtle_nests tn ON tn.id = ne.nest_id
        WHERE a.record_type IN ('nest_event', 'turtle_survey_event')
          AND a.action != 'deleted'
          AND (
-           (a.record_type = 'nest_event' AND EXISTS (
-             SELECT 1 FROM turtle_nest_events e WHERE e.id = a.record_id
-           ))
+           (a.record_type = 'nest_event' AND ne.id IS NOT NULL)
            OR
-           (a.record_type = 'turtle_survey_event' AND EXISTS (
-             SELECT 1 FROM turtle_survey_events e WHERE e.id = a.record_id
-           ))
+           (a.record_type = 'turtle_survey_event' AND tse.id IS NOT NULL)
          )
        ORDER BY occurred_at DESC
        LIMIT 20;`
     );
-    res.json({ entries: result.rows });
+
+    const entries = result.rows.map((row) => {
+      let summary = row.stored_summary;
+      if (row.record_type === "turtle_survey_event") {
+        const who = row.turtle_name ? `"${row.turtle_name}"` : `turtle ${row.tse_turtle_id}`;
+        summary = `${row.tse_event_type || "Encounter"} of ${who}${row.tse_location ? ` at ${row.tse_location}` : ""}`;
+      } else if (row.record_type === "nest_event") {
+        const described = describeNestEvent({
+          event_type: row.ne_event_type,
+          hatched_count: row.ne_hatched_count,
+          total_eggs: row.ne_total_eggs,
+          tracks_to_sea: row.ne_tracks_to_sea,
+          tracks_lost: row.ne_tracks_lost,
+        });
+        const code = row.nest_code || row.ne_stored_nest_code;
+        summary = code ? `${described} (${code})` : described;
+      }
+      return {
+        record_type: row.record_type,
+        record_id: row.record_id,
+        action: row.action,
+        summary,
+        occurred_at: row.occurred_at,
+      };
+    });
+
+    res.json({ entries });
   } catch (err) {
     console.error("Get recent audit entries error:", err);
     res.status(500).json({ error: "Server error while fetching recent activity." });

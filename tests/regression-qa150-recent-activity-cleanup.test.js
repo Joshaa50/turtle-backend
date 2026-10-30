@@ -24,20 +24,30 @@ afterAll(() => db.end().catch(() => {}));
 
 describe('GET /audit/recent (QA-150)', () => {
   it('excludes action=deleted rows and only returns rows whose underlying event still exists', async () => {
+    // QA-150 (continuation): the "still exists" check moved from an EXISTS
+    // subquery to a LEFT JOIN, because the join is also what lets the route
+    // rebuild the summary from the current turtle/nest at read time (see
+    // regression-qa150-recent-activity-dynamic-summary.test.js).
     const rows = [
-      { record_type: 'turtle_survey_event', record_id: 7, action: 'created',
-        summary: 'TAGGING of "Thalia" at Makris Gialos', occurred_at: '2026-10-24T06:10:00.000Z' },
+      { record_type: 'turtle_survey_event', record_id: 7, action: 'created', stored_summary: 'stale',
+        occurred_at: '2026-10-24T06:10:00.000Z', tse_event_type: 'TAGGING', tse_turtle_id: 47,
+        tse_location: 'Makris Gialos', turtle_name: 'Thalia', ne_event_type: null,
+        ne_hatched_count: null, ne_total_eggs: null, ne_tracks_to_sea: null, ne_tracks_lost: null,
+        ne_stored_nest_code: null, nest_code: null },
     ];
     const spy = vi.spyOn(db, 'query').mockResolvedValue({ rows });
 
     const res = await auth(request(app).get('/audit/recent'));
     expect(res.status).toBe(200);
+    expect(res.body.entries[0].summary).toBe('TAGGING of "Thalia" at Makris Gialos');
 
     const [sql] = spy.mock.calls[0];
     const text = String(sql);
     expect(text).toMatch(/action != 'deleted'/);
-    expect(text).toMatch(/EXISTS \(\s*SELECT 1 FROM turtle_nest_events e WHERE e\.id = a\.record_id/);
-    expect(text).toMatch(/EXISTS \(\s*SELECT 1 FROM turtle_survey_events e WHERE e\.id = a\.record_id/);
+    expect(text).toMatch(/LEFT JOIN turtle_nest_events ne ON a\.record_type = 'nest_event' AND ne\.id = a\.record_id/);
+    expect(text).toMatch(/LEFT JOIN turtle_survey_events tse ON a\.record_type = 'turtle_survey_event' AND tse\.id = a\.record_id/);
+    expect(text).toMatch(/record_type = 'nest_event' AND ne\.id IS NOT NULL/);
+    expect(text).toMatch(/record_type = 'turtle_survey_event' AND tse\.id IS NOT NULL/);
   });
 });
 
