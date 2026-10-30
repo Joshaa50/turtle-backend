@@ -2080,21 +2080,48 @@ if (require.main === module) {
 // so it is naturally idempotent and safe to run on every boot.
 async function backfillFirstEmergenceAt() {
   try {
+    // QA-157: a nest's earliest EMERGENCE/HATCHING event can still predate
+    // its own date_found (stray/mis-dated seed data) - joining turtle_nests
+    // here and requiring the event be on or after date_found stops those
+    // from ever being picked as "first emergence", same guard as the live
+    // POST /nest-events/create update above.
     await db.query(
       `UPDATE turtle_nests n
        SET first_emergence_at = e.first_emergence_at
        FROM (
-         SELECT DISTINCT ON (nest_id)
-           nest_id, COALESCE(start_time, created_at) AS first_emergence_at
-         FROM turtle_nest_events
-         WHERE event_type IN ('EMERGENCE', 'HATCHING')
-         ORDER BY nest_id, COALESCE(start_time, created_at) ASC
+         SELECT DISTINCT ON (ev.nest_id)
+           ev.nest_id, COALESCE(ev.start_time, ev.created_at) AS first_emergence_at
+         FROM turtle_nest_events ev
+         JOIN turtle_nests tn ON tn.id = ev.nest_id
+         WHERE ev.event_type IN ('EMERGENCE', 'HATCHING')
+           AND COALESCE(ev.start_time, ev.created_at) >= tn.date_found
+         ORDER BY ev.nest_id, COALESCE(ev.start_time, ev.created_at) ASC
        ) e
        WHERE e.nest_id = n.id AND n.first_emergence_at IS NULL;`
     );
     console.log("Backfilled turtle_nests.first_emergence_at from existing EMERGENCE/HATCHING events.");
   } catch (err) {
     console.error("Could not backfill turtle_nests.first_emergence_at:", err.message);
+  }
+}
+
+// QA-157: the backfill above already ran once against the bad seed data and
+// set first_emergence_at to a value BEFORE date_found for some nests (e.g.
+// MA-2, AG-1) - its NULL guard means it will never revisit an already-set
+// column, so fixing the query alone cannot correct rows it already got
+// wrong. Reset those back to NULL first; this is a no-op once corrected (the
+// WHERE never matches again), and the (now-fixed) backfill call right after
+// it will immediately recompute a correct value or leave it NULL.
+async function resetBadFirstEmergenceAt() {
+  try {
+    await db.query(
+      `UPDATE turtle_nests
+       SET first_emergence_at = NULL
+       WHERE first_emergence_at IS NOT NULL
+         AND first_emergence_at < date_found;`
+    );
+  } catch (err) {
+    console.error("Could not reset bad turtle_nests.first_emergence_at values:", err.message);
   }
 }
 
@@ -2106,6 +2133,7 @@ if (require.main === module) {
     } catch (err) {
       console.error("Could not ensure turtle_nests.first_emergence_at:", err.message);
     }
+    await resetBadFirstEmergenceAt();
     await backfillFirstEmergenceAt();
   })();
 }
@@ -4414,10 +4442,16 @@ app.post("/nest-events/create", requireRole(...RECORDERS), async (req, res) => {
         // rejects the query ("could not determine data type of parameter")
         // without an explicit cast, even though the outer COALESCE's result
         // is unambiguously assigned to a timestamptz column.
+        // QA-157: stray/mis-dated EMERGENCE events recorded before a nest's
+        // date_found (bad seed data, but nothing stops a real one either)
+        // must never become its first_emergence_at - that produces negative
+        // incubation days. Only apply the update when this event's own
+        // timestamp is on or after the nest's date_found.
         await db.query(
           `UPDATE turtle_nests
            SET first_emergence_at = COALESCE(first_emergence_at, COALESCE($2::timestamptz, $3::timestamptz))
-           WHERE id = $1;`,
+           WHERE id = $1
+             AND COALESCE($2::timestamptz, $3::timestamptz) >= date_found;`,
           [nest_id, start_time || null, result.rows[0]?.created_at || null]
         );
       } catch (err) {
@@ -7158,4 +7192,4 @@ if (require.main === module) {
 
 // `db` is exported so tests can stub `db.query` on the pool instance rather
 // than mocking the pg module - the pool never connects if it is never queried.
-module.exports = { app, db, signToken, backfillFirstEmergenceAt };
+module.exports = { app, db, signToken, backfillFirstEmergenceAt, resetBadFirstEmergenceAt };

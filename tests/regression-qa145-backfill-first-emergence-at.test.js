@@ -30,12 +30,16 @@ describe('backfillFirstEmergenceAt (QA-145)', () => {
     const sql = String(query.mock.calls[0][0]);
 
     expect(sql).toMatch(/UPDATE turtle_nests n\s+SET first_emergence_at = e\.first_emergence_at/);
-    expect(sql).toContain("WHERE event_type IN ('EMERGENCE', 'HATCHING')");
+    expect(sql).toContain("WHERE ev.event_type IN ('EMERGENCE', 'HATCHING')");
     // earliest per nest: DISTINCT ON (nest_id) ordered by the same
     // start_time-then-created_at preference used by the live-event code
-    expect(sql).toMatch(/DISTINCT ON \(nest_id\)/);
-    expect(sql).toMatch(/COALESCE\(start_time, created_at\) AS first_emergence_at/);
-    expect(sql).toMatch(/ORDER BY nest_id, COALESCE\(start_time, created_at\) ASC/);
+    expect(sql).toMatch(/DISTINCT ON \(ev\.nest_id\)/);
+    expect(sql).toMatch(/COALESCE\(ev\.start_time, ev\.created_at\) AS first_emergence_at/);
+    expect(sql).toMatch(/ORDER BY ev\.nest_id, COALESCE\(ev\.start_time, ev\.created_at\) ASC/);
+    // QA-157: an event dated before the nest's own date_found (stray/bad
+    // data) must never be picked as "first emergence" for that nest
+    expect(sql).toMatch(/JOIN turtle_nests tn ON tn\.id = ev\.nest_id/);
+    expect(sql).toMatch(/COALESCE\(ev\.start_time, ev\.created_at\) >= tn\.date_found/);
     // never overwrites an already-set value, and leaves nests with no
     // EMERGENCE/HATCHING event (no match in the subquery) untouched
     expect(sql).toMatch(/WHERE e\.nest_id = n\.id AND n\.first_emergence_at IS NULL/);
