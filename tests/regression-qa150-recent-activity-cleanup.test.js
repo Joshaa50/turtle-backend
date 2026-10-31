@@ -33,13 +33,13 @@ describe('GET /audit/recent (QA-150)', () => {
         occurred_at: '2026-10-24T06:10:00.000Z', tse_event_type: 'TAGGING', tse_turtle_id: 47,
         tse_location: 'Makris Gialos', turtle_name: 'Thalia', ne_event_type: null,
         ne_hatched_count: null, ne_total_eggs: null, ne_tracks_to_sea: null, ne_tracks_lost: null,
-        ne_stored_nest_code: null, nest_code: null },
+        ne_stored_nest_code: null, nest_code: null, first_event_id: 7 },
     ];
     const spy = vi.spyOn(db, 'query').mockResolvedValue({ rows });
 
     const res = await auth(request(app).get('/audit/recent'));
     expect(res.status).toBe(200);
-    expect(res.body.entries[0].summary).toBe('TAGGING of "Thalia" at Makris Gialos');
+    expect(res.body.entries[0].summary).toBe('Thalia tagged on Makris Gialos');
 
     const [sql] = spy.mock.calls[0];
     const text = String(sql);

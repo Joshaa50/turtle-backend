@@ -29,7 +29,9 @@ describe('GET /audit/recent (QA-147)', () => {
       { record_type: 'turtle_survey_event', record_id: 7, action: 'created', stored_summary: 'stale text',
         occurred_at: '2026-10-24T06:10:00.000Z', tse_event_type: 'RE-SIGHTING', tse_turtle_id: 21,
         tse_location: 'Loggos 2', turtle_name: 'TG-4021', ne_event_type: null, ne_hatched_count: null,
-        ne_total_eggs: null, ne_tracks_to_sea: null, ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null },
+        ne_total_eggs: null, ne_tracks_to_sea: null, ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null,
+        // Not this turtle's first survey event (first_event_id is some earlier id), so it reads as a re-sighting.
+        first_event_id: 2 },
       { record_type: 'nest_event', record_id: 3, action: 'created', stored_summary: 'stale text',
         occurred_at: '2026-10-24T05:50:00.000Z', tse_event_type: null, tse_turtle_id: null, tse_location: null,
         turtle_name: null, ne_event_type: 'INVENTORY', ne_hatched_count: 98, ne_total_eggs: 100,
@@ -44,7 +46,7 @@ describe('GET /audit/recent (QA-147)', () => {
     expect(res.status).toBe(200);
     expect(res.body.entries).toEqual([
       { record_type: 'turtle_survey_event', record_id: 7, action: 'created',
-        summary: 'RE-SIGHTING of "TG-4021" at Loggos 2', occurred_at: '2026-10-24T06:10:00.000Z' },
+        summary: 'TG-4021 re-sighted on Loggos 2', occurred_at: '2026-10-24T06:10:00.000Z' },
       { record_type: 'nest_event', record_id: 3, action: 'created',
         summary: 'Inventory recorded: 98 hatched of 100 eggs (VA-3)', occurred_at: '2026-10-24T05:50:00.000Z' },
     ]);

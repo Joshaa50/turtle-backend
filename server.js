@@ -6012,7 +6012,8 @@ app.get("/audit/recent", async (req, res) => {
               ne.event_type AS ne_event_type, ne.hatched_count AS ne_hatched_count,
               ne.total_eggs AS ne_total_eggs, ne.tracks_to_sea AS ne_tracks_to_sea,
               ne.tracks_lost AS ne_tracks_lost, ne.nest_code AS ne_stored_nest_code,
-              tn.nest_code AS nest_code
+              tn.nest_code AS nest_code,
+              (SELECT MIN(id) FROM turtle_survey_events WHERE turtle_id = tse.turtle_id) AS first_event_id
        FROM record_audit a
        LEFT JOIN turtle_survey_events tse ON a.record_type = 'turtle_survey_event' AND tse.id = a.record_id
        LEFT JOIN turtles t ON t.id = tse.turtle_id
@@ -6032,8 +6033,15 @@ app.get("/audit/recent", async (req, res) => {
     const entries = result.rows.map((row) => {
       let summary = row.stored_summary;
       if (row.record_type === "turtle_survey_event") {
-        const who = row.turtle_name ? `"${row.turtle_name}"` : `turtle ${row.tse_turtle_id}`;
-        summary = `${row.tse_event_type || "Encounter"} of ${who}${row.tse_location ? ` at ${row.tse_location}` : ""}`;
+        const who = row.turtle_name ? row.turtle_name : `turtle ${row.tse_turtle_id}`;
+        // QA-150 (continuation): "TAGGING of X" read like the raw event
+        // code, not a sentence. The data has no explicit "first tagging vs
+        // re-sighting" flag, but first_event_id (the lowest turtle_survey_events
+        // id for this turtle) stands in for it reliably - a turtle's first
+        // ever survey event is its tagging, every later one a re-sighting.
+        const isFirstEvent = row.first_event_id != null && row.record_id === row.first_event_id;
+        const verb = isFirstEvent ? "tagged" : "re-sighted";
+        summary = `${who} ${verb}${row.tse_location ? ` on ${row.tse_location}` : ""}`;
       } else if (row.record_type === "nest_event") {
         const described = describeNestEvent({
           event_type: row.ne_event_type,

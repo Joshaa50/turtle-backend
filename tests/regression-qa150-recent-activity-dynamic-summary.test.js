@@ -33,14 +33,15 @@ const auth = (req) => req.set('Authorization', `Bearer ${token}`);
 afterAll(() => db.end().catch(() => {}));
 
 describe('GET /audit/recent (QA-150 continuation)', () => {
-  it('rebuilds a historical raw-ID summary using the turtle\'s current name', async () => {
-    // As stored before commit a2886bf: a plain id, no name.
+  it('rebuilds a historical raw-ID summary using the turtle\'s current name, phrased as a first tagging', async () => {
+    // As stored before commit a2886bf: a plain id, no name. record_id matches
+    // first_event_id, so this is this turtle's first ever survey event - a tagging.
     const rows = [
       { record_type: 'turtle_survey_event', record_id: 59, action: 'created',
         stored_summary: 'TAGGING of turtle 59 at Xi', occurred_at: '2026-09-01T06:00:00.000Z',
         tse_event_type: 'TAGGING', tse_turtle_id: 59, tse_location: 'Xi', turtle_name: 'Nefeli',
         ne_event_type: null, ne_hatched_count: null, ne_total_eggs: null, ne_tracks_to_sea: null,
-        ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null },
+        ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null, first_event_id: 59 },
     ];
     vi.spyOn(db, 'query').mockResolvedValue({ rows });
 
@@ -50,7 +51,25 @@ describe('GET /audit/recent (QA-150 continuation)', () => {
     expect(res.body.entries).toHaveLength(1);
     // The old raw id never appears in the rendered summary.
     expect(res.body.entries[0].summary).not.toMatch(/turtle 59/);
-    expect(res.body.entries[0].summary).toBe('TAGGING of "Nefeli" at Xi');
+    expect(res.body.entries[0].summary).toBe('Nefeli tagged on Xi');
+  });
+
+  it('phrases a later survey event for the same turtle as a re-sighting, not a tagging', async () => {
+    // record_id (104) is not the turtle's lowest turtle_survey_events id (59),
+    // so this is a later encounter with an already-tagged turtle.
+    const rows = [
+      { record_type: 'turtle_survey_event', record_id: 104, action: 'created',
+        stored_summary: 'TAGGING of "Ariadne" at Megas Lakkos', occurred_at: '2026-10-31T06:00:00.000Z',
+        tse_event_type: 'TAGGING', tse_turtle_id: 7, tse_location: 'Megas Lakkos', turtle_name: 'Ariadne',
+        ne_event_type: null, ne_hatched_count: null, ne_total_eggs: null, ne_tracks_to_sea: null,
+        ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null, first_event_id: 59 },
+    ];
+    vi.spyOn(db, 'query').mockResolvedValue({ rows });
+
+    const res = await auth(request(app).get('/audit/recent'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries[0].summary).toBe('Ariadne re-sighted on Megas Lakkos');
   });
 
   it('rebuilds a historical nest-event summary with the nest\'s current code', async () => {
