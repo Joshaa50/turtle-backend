@@ -78,6 +78,7 @@ const PUBLIC_ROUTES = [
   "POST /users/request-reactivation",
   "GET /public/stats",
   "GET /public/stations",
+  "GET /config/public",
   "GET /demo/accounts",
   "POST /demo/login",
 ];
@@ -863,7 +864,7 @@ if (require.main === module) {
 // Register endpoint
 app.post("/users/register", accountActionLimiter, async (req, res) => {
   try {
-    const { first_name, last_name, email, password, station, is_password_reset_needed, privacy_notice_accepted } = req.body;
+    const { first_name, last_name, email, password, station, is_password_reset_needed, privacy_notice_accepted, age_confirmed } = req.body;
 
     if (!first_name || !last_name || !email || !password || !station) {
       return res.status(400).json({ error: "Missing required fields (including station)." });
@@ -875,12 +876,19 @@ app.post("/users/register", accountActionLimiter, async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 8 characters." });
     }
 
-    // A checkbox the client enforces is only a UI nicety - what actually
-    // proves consent is the server refusing to create the account without it,
-    // and the timestamp below is the record of when that happened.
-    if (privacy_notice_accepted !== true) {
+    // Two separate confirmations, not one: having read the notice and being
+    // 18 or over are different facts, and folding them into a single
+    // "I agree" checkbox (GD-006) reads as consent to processing rather than
+    // an acknowledgement, and drops the age check entirely. A checkbox the
+    // client enforces is only a UI nicety - what actually proves both facts
+    // is the server refusing to create the account without them, and the
+    // timestamp below is the record of when that happened.
+    const missing = [];
+    if (privacy_notice_accepted !== true) missing.push("reading the privacy notice");
+    if (age_confirmed !== true) missing.push("confirming you are 18 or over");
+    if (missing.length > 0) {
       return res.status(400).json({
-        error: "You must agree to the data notice to create an account."
+        error: `You must confirm ${missing.join(" and ")} to create an account.`
       });
     }
 
@@ -1311,6 +1319,29 @@ app.get("/public/stats", async (req, res) => {
     res.json({ message: "Public stats fetched successfully", stats: result.rows[0] });
   } catch (err) {
     console.error("Public stats error:", err);
+    res.status(500).json({ error: "Server error." });
+  }
+});
+
+// Deployment-specific org/contact info and the live retention period, read
+// before sign-in so the registration screen's privacy notice can name the
+// real controller/processor and the real retention period instead of
+// hard-coding either. Never fall back to a real address here - an unset env
+// var means "no contact configured", not "use Josh's personal inbox".
+app.get("/config/public", async (req, res) => {
+  try {
+    const retention = await getRetentionSettings();
+    res.json({
+      org_name: process.env.ORG_NAME || "Turtle Guard",
+      privacy_contact_email: process.env.PRIVACY_CONTACT_EMAIL || null,
+      operator_contact_email: process.env.OPERATOR_CONTACT_EMAIL || null,
+      retention: {
+        auto_erase_enabled: retention.auto_erase_enabled,
+        inactive_days: retention.inactive_days,
+      },
+    });
+  } catch (err) {
+    console.error("Public config error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });

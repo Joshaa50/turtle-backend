@@ -15,6 +15,7 @@ const baseBody = {
   email: 'maria.karydi@example.com',
   station: 'Lix',
   privacy_notice_accepted: true,
+  age_confirmed: true,
 };
 
 let query;

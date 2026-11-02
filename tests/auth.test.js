@@ -87,6 +87,50 @@ describe('PUBLIC_ROUTES — only these are open', () => {
     const res = await request(app).get('/test/../turtles');
     expect(res.status).toBe(401);
   });
+
+  it('serves /config/public unauthenticated, with env-driven org/contact info and the live retention setting', async () => {
+    const prevOrg = process.env.ORG_NAME;
+    const prevPrivacy = process.env.PRIVACY_CONTACT_EMAIL;
+    const prevOperator = process.env.OPERATOR_CONTACT_EMAIL;
+    process.env.ORG_NAME = 'Kefalonia Turtle Watch';
+    process.env.PRIVACY_CONTACT_EMAIL = 'privacy@example.org';
+    process.env.OPERATOR_CONTACT_EMAIL = 'support@example.org';
+    query.mockResolvedValue({ rows: [{ value: { auto_erase_enabled: true, inactive_days: 730 } }] });
+
+    try {
+      const res = await request(app).get('/config/public');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        org_name: 'Kefalonia Turtle Watch',
+        privacy_contact_email: 'privacy@example.org',
+        operator_contact_email: 'support@example.org',
+        retention: { auto_erase_enabled: true, inactive_days: 730 },
+      });
+    } finally {
+      process.env.ORG_NAME = prevOrg;
+      process.env.PRIVACY_CONTACT_EMAIL = prevPrivacy;
+      process.env.OPERATOR_CONTACT_EMAIL = prevOperator;
+    }
+  });
+
+  it('falls back to null contacts (never a hard-coded address) when the env vars are unset, without 500ing', async () => {
+    const prevPrivacy = process.env.PRIVACY_CONTACT_EMAIL;
+    const prevOperator = process.env.OPERATOR_CONTACT_EMAIL;
+    delete process.env.PRIVACY_CONTACT_EMAIL;
+    delete process.env.OPERATOR_CONTACT_EMAIL;
+    query.mockResolvedValue({ rows: [] });
+
+    try {
+      const res = await request(app).get('/config/public');
+      expect(res.status).toBe(200);
+      expect(res.body.privacy_contact_email).toBeNull();
+      expect(res.body.operator_contact_email).toBeNull();
+      expect(JSON.stringify(res.body)).not.toMatch(/@/);
+    } finally {
+      if (prevPrivacy !== undefined) process.env.PRIVACY_CONTACT_EMAIL = prevPrivacy;
+      if (prevOperator !== undefined) process.env.OPERATOR_CONTACT_EMAIL = prevOperator;
+    }
+  });
 });
 
 describe('requireRole', () => {

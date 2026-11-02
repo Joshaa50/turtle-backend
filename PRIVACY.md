@@ -6,6 +6,22 @@ app, not as a legal privacy policy — read it as an honest technical
 description, and treat it as a starting point for your own data-protection
 review rather than a substitute for one.
 
+## Who is responsible
+
+The organization running a Turtle Guard deployment decides why volunteer and
+field data is collected and answers requests about it (the "controller").
+`[Processor legal name - TBC]` runs Turtle Guard on the organization's
+instructions, hosting and operating the app (the "processor"). The app is for
+people aged 18 and over; registration requires confirming this, and no date
+of birth is collected.
+
+The lawful basis for processing volunteer and staff data is **legitimate
+interests**: running a conservation volunteer programme needs accurate,
+attributable records, this is kept to what is needed, and it does not
+override a person's own rights. This is not consent — nobody is asked to
+consent to being part of the team, and anyone can object (see "Questions"
+below).
+
 ## What is collected
 
 **Team accounts:** first and last name, email, role, station, and an
@@ -25,11 +41,12 @@ Leader's approval before they can sign in.
 
 **Optional AI features:** a natural-language query over nest data, and a
 dictated field note that gets transcribed into structured counts. Both are
-sent to Google's Gemini API for processing. The transcription is not stored
-by this app — only the structured result the person then chooses to save is.
-The query feature sends the nest data relevant to the question to Gemini to
-answer it; see [Google's Gemini API terms](https://ai.google.dev/gemini-api/terms)
-for how Google handles that.
+sent to Google's Gemini API for processing, only if a deployment has switched
+them on. The transcription is not stored by this app — only the structured
+result the person then chooses to save is. The query feature sends the nest
+data relevant to the question to Gemini to answer it; see
+[Google's Gemini API terms](https://ai.google.dev/gemini-api/terms) for how
+Google handles that.
 
 ## Who can see it
 
@@ -37,23 +54,20 @@ for how Google handles that.
   total eggs, hatchlings released — through one endpoint. No GPS
   coordinates, photos, or individual records are ever included in that
   response.
-- **Any signed-in team member, in any of the four roles**, can currently
-  read the precise GPS coordinates and photos for every nest and emergence
-  in the system, and every turtle record. **Role differences today govern
-  who can create, edit, and approve records — not who can read them.** This
-  is a deliberate non-priority for teams that mark and physically protect
-  nests in the field (a barrier makes the location obvious on the beach
-  anyway, so restricting it in the app adds friction without adding
-  secrecy). If your program instead relies on nest locations being kept
-  quiet — no physical marker, a beach with public access, a poaching risk
-  the team manages by not disclosing coordinates — read-access restriction
-  by role is not built yet and should be discussed before piloting.
+- **Exact nest and emergence GPS, and their photos**, are visible only to a
+  Coordinator, Field Leader or Field Assistant by default ("restricted"). A
+  Coordinator can switch this to "open" in Project Settings, so every
+  signed-in role can read them — a deliberate choice for teams that mark and
+  physically protect nests in the field, where a barrier makes the location
+  obvious on the beach anyway. Which setting applies depends on the
+  project; check with your Coordinator if it matters to you.
 - **A Coordinator or Field Leader** additionally sees the full team
   directory (every account's name, email, role, station, and active status),
   and reviews Field Volunteers' submissions before they're marked confirmed.
-- **Nobody outside the team** — Google's Gemini API aside, for the two
-  optional AI features above — receives any of this data. The app has no
-  analytics or advertising trackers.
+- **Nobody outside the team** — hosting providers that store and run the app,
+  and Google's Gemini API where the two optional AI features above are
+  switched on, aside — receives any of this data. The app has no advertising
+  trackers.
 
 ## Where it lives
 
@@ -69,12 +83,12 @@ GPS coordinates for active nests can be sensitive: poaching and egg theft are
 a real risk for some sea turtle conservation programs, which is exactly why
 the public stats endpoint returns aggregates only and nothing
 location-specific, regardless of how any individual program protects its
-nests on the ground. Whether the in-app role-visibility gap above matters
-depends on how your program actually protects a nest once it's found — a
-team that marks and physically barriers each nest, so the location is
-already visible on the beach, has no secrecy for the app to preserve or leak.
-A team that protects nests by keeping their coordinates undisclosed should
-treat that gap as a real one to resolve before piloting.
+nests on the ground. Whether the "restricted" or "open" visibility setting
+above is right for your program depends on how it actually protects a nest
+once it's found — a team that marks and physically barriers each nest, so the
+location is already visible on the beach, has no secrecy for the app to
+preserve or leak. A team that protects nests by keeping their coordinates
+undisclosed should keep the default "restricted" setting.
 
 ## Retention and deletion
 
@@ -107,13 +121,15 @@ to type the account's email address to confirm, and it refuses to erase the
 last active coordinator.
 
 **Automatic erasure for a dormant account**, configured in Project Settings
-(Project Coordinator only, off by default). When turned on with a number of
-days, an account nobody has signed into for that long is erased the same way
-as above, the next time a coordinator opens the team list. A coordinator is
-warned - which accounts, and when - 14 days before it happens, so there is a
-chance to notice "on a long break" before it becomes "gone." The demo
-accounts used to show the app are never swept, and the last active
-coordinator is never auto-erased regardless of how long they have been away.
+(Project Coordinator only). The default is off, with a period of 365 days of
+inactivity ready to use the moment it's switched on; a Coordinator can change
+the period to anywhere from 30 days to about ten years. Once on, an account
+nobody has signed into for that long is erased the same way as above, the
+next time a coordinator opens the team list. A coordinator is warned - which
+accounts, and when - 14 days before it happens, so there is a chance to
+notice "on a long break" before it becomes "gone." The demo accounts used to
+show the app are never swept, and the last active coordinator is never
+auto-erased regardless of how long they have been away.
 
 If your organization needs self-service erasure (a person requesting their
 own removal, rather than a coordinator acting on their behalf), raise it
@@ -122,5 +138,9 @@ before piloting - that is still not built.
 ## Questions
 
 This is a pilot-stage app under active development. For questions about this
-document or a specific data-handling need, contact the maintainer at
-joshaa50@gmail.com.
+document, a specific data-handling need, or a request about your own
+information, contact your Coordinator or the privacy contact address
+configured for this deployment.
+
+---
+Last updated: 2 November 2026 (GD-006).

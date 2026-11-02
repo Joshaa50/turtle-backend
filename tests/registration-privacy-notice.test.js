@@ -1,9 +1,10 @@
-// The sign-up screen shows a data-use notice with a required checkbox, but a
-// checkbox the client enforces is only a UI nicety - a request built by hand,
-// or a client that never got the update, could skip straight past it. This
-// pins down that the server refuses to create an account without an explicit
-// privacy_notice_accepted: true, and records when consent was given rather
-// than just accepting the client's word for it.
+// The sign-up screen shows a data-use notice and an 18+ confirmation as two
+// separate required checkboxes (GD-006), but a checkbox the client enforces
+// is only a UI nicety - a request built by hand, or a client that never got
+// the update, could skip straight past it. This pins down that the server
+// refuses to create an account without both privacy_notice_accepted: true
+// and age_confirmed: true, and records the acceptance timestamp rather than
+// just accepting the client's word for it.
 import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import server from '../server.js';
@@ -29,31 +30,54 @@ beforeEach(() => {
 
 afterAll(() => db.end().catch(() => {}));
 
-describe('POST /users/register — consent to the data notice', () => {
-  it('refuses to create an account when the notice was not accepted', async () => {
+describe('POST /users/register — consent to the data notice and age confirmation', () => {
+  it('refuses to create an account when neither was accepted', async () => {
     const res = await request(app).post('/users/register').send(baseBody);
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/data notice/i);
+    expect(res.body.error).toMatch(/privacy notice/i);
+    expect(res.body.error).toMatch(/18 or over/i);
     expect(query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO users'), expect.anything());
   });
 
-  it('refuses a falsy or non-boolean acceptance value, not just a missing one', async () => {
+  it('refuses when age_confirmed is missing but the notice was accepted', async () => {
+    const res = await request(app)
+      .post('/users/register')
+      .send({ ...baseBody, privacy_notice_accepted: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/18 or over/i);
+    expect(res.body.error).not.toMatch(/privacy notice/i);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO users'), expect.anything());
+  });
+
+  it('refuses when privacy_notice_accepted is missing but age was confirmed', async () => {
+    const res = await request(app)
+      .post('/users/register')
+      .send({ ...baseBody, age_confirmed: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/privacy notice/i);
+    expect(res.body.error).not.toMatch(/18 or over/i);
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO users'), expect.anything());
+  });
+
+  it('refuses falsy or non-boolean values for either flag, not just missing ones', async () => {
     for (const value of [false, 'true', 1, null]) {
       query.mockClear();
       const res = await request(app)
         .post('/users/register')
-        .send({ ...baseBody, privacy_notice_accepted: value });
+        .send({ ...baseBody, privacy_notice_accepted: value, age_confirmed: true });
 
       expect(res.status).toBe(400);
       expect(query).not.toHaveBeenCalledWith(expect.stringContaining('INSERT INTO users'), expect.anything());
     }
   });
 
-  it('creates the account and records the acceptance timestamp when accepted', async () => {
+  it('creates the account and records the acceptance timestamp when both are true', async () => {
     const res = await request(app)
       .post('/users/register')
-      .send({ ...baseBody, privacy_notice_accepted: true });
+      .send({ ...baseBody, privacy_notice_accepted: true, age_confirmed: true });
 
     expect(res.status).toBe(200);
     const insertCall = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO users'));
@@ -65,7 +89,7 @@ describe('POST /users/register — consent to the data notice', () => {
   it('still enforces the existing required-fields check first', async () => {
     const res = await request(app)
       .post('/users/register')
-      .send({ ...baseBody, station: undefined, privacy_notice_accepted: true });
+      .send({ ...baseBody, station: undefined, privacy_notice_accepted: true, age_confirmed: true });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/required fields/i);

@@ -19,6 +19,7 @@ const body = (over = {}) => ({
   password: 'a-real-password',
   station: 'Lix',
   privacy_notice_accepted: true,
+  age_confirmed: true,
   ...over,
 });
 
