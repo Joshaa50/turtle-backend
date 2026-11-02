@@ -12,7 +12,12 @@
 export const SITE = {
   // Kefalonia, west coast survey areas. Anything outside this box is not a
   // beach this project surveys, whatever the record says.
-  bbox: { latMin: 38.05, latMax: 38.42, lonMin: 20.40, lonMax: 20.85 },
+  // lonMin was 20.40, which put three real beach centres (Kounopetra 20.388,
+  // Vrakhinari 20.378, Vatsa 20.376) and every nest/emergence around them
+  // outside the box - the audit was flagging real west-coast fieldwork as
+  // "outside the survey area". Widened with the same margin the other edges
+  // already carry.
+  bbox: { latMin: 38.05, latMax: 38.42, lonMin: 20.28, lonMax: 20.85 },
 };
 
 // Nesting runs late May to August here; hatching continues into October. A nest

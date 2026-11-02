@@ -81,6 +81,19 @@ describe('auditNest', () => {
     const f = auditNest({ ...goodNest, gps_lat: '51.5074000', gps_long: '-0.1278000' }, { beaches });
     expect(severities(f)).toContain('suspect:gps');
   });
+
+  it('accepts the west-coast beaches (Kounopetra, Vrakhinari, Vatsa)', () => {
+    // Real beach centres, all west of the box's old lonMin of 20.40 - the
+    // audit used to flag these and every nest around them as out of area.
+    for (const [lat, lon] of [
+      ['38.153596', '20.387870'], // Kounopetra
+      ['38.162176', '20.377554'], // Vrakhinari
+      ['38.164585', '20.376359'], // Vatsa
+    ]) {
+      const f = auditNest({ ...goodNest, gps_lat: lat, gps_long: lon }, { beaches });
+      expect(severities(f)).not.toContain('suspect:gps');
+    }
+  });
 });
 
 describe('auditTurtle', () => {
