@@ -1015,9 +1015,11 @@ app.post("/users/logout", async (req, res) => {
 // session instead: the four addresses below are the only ones it will ever
 // issue this way, and no credential exists in the client to leak.
 //
-// Set DEMO_LOGIN=off in the environment to switch the whole thing off without
-// a redeploy, once the app is holding data that matters.
-const DEMO_LOGIN_ENABLED = String(process.env.DEMO_LOGIN || "on").toLowerCase() !== "off";
+// Default-deny: DEMO_LOGIN must be explicitly set to "on" in the environment
+// to enable this. Unset, or any value other than exactly "on" (e.g. a typo
+// like "true"), leaves it off - so a new deployment nobody has configured
+// yet never hands out signed tokens for free.
+const DEMO_LOGIN_ENABLED = String(process.env.DEMO_LOGIN || "off").toLowerCase() === "on";
 
 const DEMO_ACCOUNTS = {
   "Coordinator": "sofia.manthou@turtleguard.demo",
