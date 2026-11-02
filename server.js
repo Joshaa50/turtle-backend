@@ -4186,10 +4186,10 @@ app.get("/nests", async (req, res) => {
     const sql = `
       WITH excavation AS (
         SELECT DISTINCT ON (nest_code)
-               nest_code, created_at AS hatched_at
+               nest_code, COALESCE(start_time, created_at) AS hatched_at
         FROM turtle_nest_events
         WHERE event_type LIKE '%INVENTORY%'
-        ORDER BY nest_code, created_at DESC, id DESC
+        ORDER BY nest_code, COALESCE(start_time, created_at) DESC, id DESC
       )
       SELECT
         n.id, n.nest_code, n.total_num_eggs, n.current_num_eggs,
@@ -5990,9 +5990,12 @@ app.get("/audit/:recordType/:recordId", requireRole(...REVIEWERS), async (req, r
 // role sees the Dashboard.
 app.get("/audit/recent", async (req, res) => {
   try {
-    // QA-150: three ways a row here stopped being real "recent activity".
-    // 1) action = 'deleted' is the audit trail for a deletion, not a new
-    //    event - including it made a deletion look like fresh activity.
+    // QA-150/QA-161: three ways a row here stopped being real "recent activity".
+    // 1) Only action = 'created' is a new event. 'deleted' is the audit trail
+    //    for a deletion (fresh activity look-alike), and 'updated' is a
+    //    re-save of an existing record written whenever its PUT route edits
+    //    it - rendering it with the same wording as a brand-new record makes
+    //    an edit (or a double-edit) look like one or two new sightings.
     // 2) record_audit is append-only (see its header comment) and outlives
     //    the record it describes, so deleting a nest's events (or a turtle's
     //    survey events) leaves their 'created' rows behind with nothing for
@@ -6020,7 +6023,7 @@ app.get("/audit/recent", async (req, res) => {
        LEFT JOIN turtle_nest_events ne ON a.record_type = 'nest_event' AND ne.id = a.record_id
        LEFT JOIN turtle_nests tn ON tn.id = ne.nest_id
        WHERE a.record_type IN ('nest_event', 'turtle_survey_event')
-         AND a.action != 'deleted'
+         AND a.action = 'created'
          AND (
            (a.record_type = 'nest_event' AND ne.id IS NOT NULL)
            OR
@@ -6039,7 +6042,12 @@ app.get("/audit/recent", async (req, res) => {
         // re-sighting" flag, but first_event_id (the lowest turtle_survey_events
         // id for this turtle) stands in for it reliably - a turtle's first
         // ever survey event is its tagging, every later one a re-sighting.
-        const isFirstEvent = row.first_event_id != null && row.record_id === row.first_event_id;
+        // QA-150: turtle_survey_events.id can be a BIGINT, which
+        // node-postgres returns as a string (first_event_id), while
+        // record_audit.record_id is a JS number - a strict === between the
+        // two always failed, so no turtle was ever shown as "tagged".
+        // Numeric coercion makes the comparison type-safe either way.
+        const isFirstEvent = row.first_event_id != null && Number(row.record_id) === Number(row.first_event_id);
         const verb = isFirstEvent ? "tagged" : "re-sighted";
         summary = `${who} ${verb}${row.tse_location ? ` on ${row.tse_location}` : ""}`;
       } else if (row.record_type === "nest_event") {

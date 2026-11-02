@@ -43,7 +43,9 @@ describe('GET /audit/recent (QA-150)', () => {
 
     const [sql] = spy.mock.calls[0];
     const text = String(sql);
-    expect(text).toMatch(/action != 'deleted'/);
+    // QA-161: tightened from "!= 'deleted'" to "= 'created'" so edits
+    // ('updated' rows) no longer surface as if they were new activity.
+    expect(text).toMatch(/action = 'created'/);
     expect(text).toMatch(/LEFT JOIN turtle_nest_events ne ON a\.record_type = 'nest_event' AND ne\.id = a\.record_id/);
     expect(text).toMatch(/LEFT JOIN turtle_survey_events tse ON a\.record_type = 'turtle_survey_event' AND tse\.id = a\.record_id/);
     expect(text).toMatch(/record_type = 'nest_event' AND ne\.id IS NOT NULL/);

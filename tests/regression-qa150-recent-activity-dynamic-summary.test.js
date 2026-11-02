@@ -54,6 +54,27 @@ describe('GET /audit/recent (QA-150 continuation)', () => {
     expect(res.body.entries[0].summary).toBe('Nefeli tagged on Xi');
   });
 
+  it('still reads "tagged" when first_event_id comes back as a string (BIGINT MIN(id)), not a number', async () => {
+    // node-postgres returns int8/bigint results (e.g. MIN(id) over a BIGINT
+    // id column) as strings, while record_audit.record_id is a plain
+    // INTEGER and arrives as a JS number. A strict === between "101" and
+    // 101 is always false, which is exactly how this bug hid a turtle's
+    // first-ever survey event behind "re-sighted" forever.
+    const rows = [
+      { record_type: 'turtle_survey_event', record_id: 101, action: 'created',
+        stored_summary: 'TAGGING of turtle 101 at Xi', occurred_at: '2026-10-31T06:00:00.000Z',
+        tse_event_type: 'TAGGING', tse_turtle_id: 101, tse_location: 'Xi', turtle_name: 'Selini',
+        ne_event_type: null, ne_hatched_count: null, ne_total_eggs: null, ne_tracks_to_sea: null,
+        ne_tracks_lost: null, ne_stored_nest_code: null, nest_code: null, first_event_id: '101' },
+    ];
+    vi.spyOn(db, 'query').mockResolvedValue({ rows });
+
+    const res = await auth(request(app).get('/audit/recent'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries[0].summary).toBe('Selini tagged on Xi');
+  });
+
   it('phrases a later survey event for the same turtle as a re-sighting, not a tagging', async () => {
     // record_id (104) is not the turtle's lowest turtle_survey_events id (59),
     // so this is a later encounter with an already-tagged turtle.

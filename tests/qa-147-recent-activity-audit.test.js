@@ -55,9 +55,10 @@ describe('GET /audit/recent (QA-147)', () => {
     expect(String(sql)).toMatch(/record_type IN \('nest_event', 'turtle_survey_event'\)/);
     expect(String(sql)).toMatch(/ORDER BY occurred_at DESC/);
     expect(String(sql)).toMatch(/LIMIT 20/);
-    // QA-150: deleted-record audit trail entries and rows whose underlying
-    // event has since been deleted are excluded from this feed.
-    expect(String(sql)).toMatch(/action != 'deleted'/);
+    // QA-150/QA-161: only genuinely new activity belongs in this feed -
+    // deleted-record audit rows, edits ('updated'), and rows whose
+    // underlying event has since been deleted are all excluded.
+    expect(String(sql)).toMatch(/action = 'created'/);
     expect(String(sql)).toMatch(/LEFT JOIN turtle_survey_events/);
     expect(String(sql)).toMatch(/LEFT JOIN turtle_nest_events/);
   });
