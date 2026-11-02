@@ -27,6 +27,11 @@ const count = (flag, dflt) => {
   return i === -1 ? dflt : Math.max(0, parseInt(args[i + 1], 10) || 0);
 };
 const WANT = { nests: count('--nests', 4), turtles: count('--turtles', 2), emergences: count('--emergences', 5) };
+const YEAR = (() => {
+  const i = args.indexOf('--year');
+  const parsed = i === -1 ? NaN : parseInt(args[i + 1], 10);
+  return Number.isNaN(parsed) ? new Date().getUTCFullYear() : parsed;
+})();
 
 const rand = (min, max) => min + Math.random() * (max - min);
 const round = (v, dp = 2) => Number(v.toFixed(dp));
@@ -51,10 +56,11 @@ const api = async (path, init = {}) => {
   return { status: res.status, body: await res.json().catch(() => ({})) };
 };
 
-// A date inside this year's nesting season, and never in the future.
-const seasonDate = () => {
+// A date inside the given year's nesting season (default: this year), and
+// never in the future - a historical year's "never in the future" clamp is a
+// no-op since it is already in the past.
+const seasonDate = (year = YEAR) => {
   const now = new Date();
-  const year = now.getUTCFullYear();
   const start = Date.UTC(year, SEASON.firstMonth - 1, 20);
   const end = Math.min(now.getTime() - 86400000, Date.UTC(year, SEASON.lastMonth - 1, 15));
   return new Date(rand(Math.min(start, end), end));

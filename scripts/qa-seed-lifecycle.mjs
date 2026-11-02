@@ -10,6 +10,9 @@
 //
 //   node scripts/qa-seed-lifecycle.mjs             # preview, writes nothing
 //   node scripts/qa-seed-lifecycle.mjs --confirm   # create for real
+//   node scripts/qa-seed-lifecycle.mjs --confirm --year 2024 --count 2
+//     # shift PLAN's dateFound to 2024 (same month/day) and only use the
+//     # first 2 of PLAN's 3 entries - for lighter historical seeding.
 //
 // Created ids are appended to qa-out/seed-manifest.json like qa-seed.mjs's,
 // so they can be found and removed the same way:
@@ -19,7 +22,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { NEST } from './lib/plausibility.mjs';
 
 const API = process.env.VITE_API_URL || process.env.API_URL || 'https://turtle-backend-pxcx.onrender.com';
-const confirm = process.argv.includes('--confirm');
+const args = process.argv.slice(2);
+const confirm = args.includes('--confirm');
+const flagValue = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+const year = parseInt(flagValue('--year'), 10) || new Date().getUTCFullYear();
 
 const round = (v, dp = 2) => Number(v.toFixed(dp));
 const iso = (d) => d.toISOString().slice(0, 10);
@@ -54,6 +60,18 @@ const PLAN = [
   },
 ];
 
+// --year shifts every dateFound to the given year (same month/day); everything
+// downstream (emergence date, inventory date, hatch counts) derives from
+// dateFound via addDays, so this one change is enough to move a whole
+// lifecycle to a past year correctly. --count limits how many of PLAN's
+// entries are used (default: all of them).
+const countFlag = flagValue('--count');
+const planCount = countFlag === undefined ? PLAN.length : Math.max(0, parseInt(countFlag, 10) || 0);
+const SELECTED_PLAN = PLAN.slice(0, planCount).map((p) => ({
+  ...p,
+  dateFound: `${year}${p.dateFound.slice(4)}`,
+}));
+
 const nearby = (lat, lon) => ({
   lat: round(lat + (Math.random() * 2 - 1) * 0.0007, 7),
   lon: round(lon + (Math.random() * 2 - 1) * 0.0007, 7),
@@ -80,7 +98,7 @@ const main = async () => {
     return (used.length ? Math.max(...used) : 0) + 1;
   };
 
-  const plan = PLAN.map((p) => {
+  const plan = SELECTED_PLAN.map((p) => {
     const found = new Date(`${p.dateFound}T00:00:00.000Z`);
     const emergence = addDays(found, p.emergenceDaysAfter);
     const inventory = addDays(emergence, p.inventoryDaysAfterEmergence);
