@@ -633,9 +633,13 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(requireAuth);
 
 // Connect to Neon
+// GD-008: rejectUnauthorized:false encrypted the connection but did not check
+// the server certificate, so it accepted a forged one - TLS with no identity
+// check. Neon's certificate is publicly trusted, so verifying it needs no
+// extra CA material here.
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Neon requires SSL
+  ssl: { rejectUnauthorized: true }, // Neon requires SSL; verify its certificate
   family: 4 // Force IPv4 for Render
 });
 
@@ -645,7 +649,7 @@ if (require.main === module) {
   (async () => {
     try {
       const res = await db.query("SELECT NOW()");
-      console.log("Connected to Neon Postgres! Time:", res.rows[0].now);
+      console.log("Connected to Neon Postgres! Time:", res.rows[0].now, "- database TLS verified");
     } catch (err) {
       console.error("Database connection error:", err);
     }
