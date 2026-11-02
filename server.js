@@ -1632,6 +1632,14 @@ app.get("/nests/:nestId/photos", async (req, res) => {
   const { nestId } = req.params;
   if (!/^\d+$/.test(nestId)) return res.status(400).json({ error: "nestId must be a number." });
 
+  // GD-003: triangulation/relocation photos are location data in picture
+  // form, so in restricted mode they are blocked outright for anyone outside
+  // AI_ROLES rather than returned with fields nulled - there is no partial
+  // version of a photo to redact.
+  if (!AI_ROLES.includes(req.user?.role) && (await getNestLocationVisibility()) === "restricted") {
+    return res.status(403).json({ error: "Exact nest locations and photos are restricted." });
+  }
+
   try {
     const result = await db.query(
       `SELECT id, nest_id, mime_type, caption, taken_at, uploaded_by, created_at,
@@ -1650,6 +1658,11 @@ app.get("/nests/:nestId/photos", async (req, res) => {
 app.get("/nest-photos/:photoId", async (req, res) => {
   const { photoId } = req.params;
   if (!/^\d+$/.test(photoId)) return res.status(400).json({ error: "photoId must be a number." });
+
+  // GD-003: see the matching check in GET /nests/:nestId/photos above.
+  if (!AI_ROLES.includes(req.user?.role) && (await getNestLocationVisibility()) === "restricted") {
+    return res.status(403).json({ error: "Exact nest locations and photos are restricted." });
+  }
 
   try {
     const result = await db.query(
@@ -2712,6 +2725,57 @@ const readRetentionBody = (body) => {
   return { value: { auto_erase_enabled: body.auto_erase_enabled, inactive_days: days } };
 };
 
+// GD-003: exact nest/emergence GPS and triangulation/relocation photos are
+// the main thing worth protecting for a project with poaching risk.
+// "restricted" (the default for a project that has never touched this
+// setting) hides them from everyone except AI_ROLES; "open" shows them to
+// every signed-in role, which is what every project did before this setting
+// existed.
+const DEFAULT_NEST_LOCATION_VISIBILITY = "restricted";
+
+const getNestLocationVisibility = async () => {
+  const stored = await readSetting("nest_location_visibility");
+  const value = stored?.value;
+  return value === "open" || value === "restricted" ? value : DEFAULT_NEST_LOCATION_VISIBILITY;
+};
+
+const readNestLocationVisibilityBody = (body) => {
+  if (body?.value !== "open" && body?.value !== "restricted") {
+    return { error: 'value must be "open" or "restricted".' };
+  }
+  return { value: { value: body.value } };
+};
+
+// GD-003: the fields on a nest/emergence/nest-event/morning-survey record
+// that pinpoint where a nest or emergence actually is. Nulled out below for
+// anyone outside AI_ROLES (the same roles GD-002 trusts with exact
+// coordinates) when the project is in "restricted" mode - "open" mode, or a
+// viewer in AI_ROLES, keeps every field as-is regardless of whose record it
+// is, including a Field Volunteer's own submission.
+const LOCATION_FIELDS = [
+  "gps_lat", "gps_long",
+  "tri_tl_lat", "tri_tl_long", "tri_tl_desc", "tri_tl_distance",
+  "tri_tr_lat", "tri_tr_long", "tri_tr_desc", "tri_tr_distance",
+  "original_gps_lat", "original_gps_long",
+  "reburied_gps_lat", "reburied_gps_long",
+  "tl_lat", "tl_long", "tr_lat", "tr_long",
+];
+
+const redactLocationFields = (record, role, visibility) => {
+  if (!record) return record;
+  if (visibility !== "restricted" || AI_ROLES.includes(role)) return record;
+  for (const field of LOCATION_FIELDS) {
+    if (record[field] !== undefined) record[field] = null;
+  }
+  record.location_hidden = true;
+  return record;
+};
+
+const redactLocationRows = (rows, role, visibility) => {
+  if (Array.isArray(rows)) rows.forEach((row) => redactLocationFields(row, role, visibility));
+  return rows;
+};
+
 // Demo accounts (see DEMO_ACCOUNTS) never accrue a real last_login_at - only
 // /users/login sets it, never /demo/login - so without this exclusion they
 // would eventually look indistinguishable from a genuinely dormant account
@@ -2910,6 +2974,7 @@ app.get("/settings", async (req, res) => {
       alerts: await getAlertSettings(),
       field_requirements: await getFieldRequirements(),
       retention: await getRetentionSettings(),
+      nest_location_visibility: await getNestLocationVisibility(),
     });
   } catch (err) {
     console.error("Get settings error:", err);
@@ -2941,6 +3006,7 @@ app.put("/settings/alerts", requireRole(COORDINATOR), saveSetting("alerts", read
 app.put("/settings/retention", requireRole(COORDINATOR), saveSetting("retention", readRetentionBody, async () => ({ retention: await getRetentionSettings() })));
 app.put("/settings/field-requirements", requireRole(COORDINATOR), saveSetting("field_requirements", readFieldRequirementsBody, async () => ({ field_requirements: await getFieldRequirements() })));
 app.put("/settings/review-rules", requireRole(COORDINATOR), saveSetting("review_rules", readReviewRulesBody, async () => ({ review_rules: await getReviewRules() })));
+app.put("/settings/nest-location-visibility", requireRole(COORDINATOR), saveSetting("nest_location_visibility", readNestLocationVisibilityBody, async () => ({ nest_location_visibility: await getNestLocationVisibility() })));
 
 // Whether this person's record of this type is held for a Field Leader. Only
 // ever affects records saved afterwards - what is already queued stays queued.
@@ -4359,6 +4425,8 @@ app.get("/nests", async (req, res) => {
     `;
 
     const result = await db.query(sql);
+    const visibility = await getNestLocationVisibility();
+    redactLocationRows(result.rows, req.user?.role, visibility);
 
     res.json({
       message: "Nests fetched successfully",
@@ -4406,6 +4474,8 @@ app.get("/nests/:nest_code", async (req, res) => {
     if (nest.track_sketch) {
       nest.track_sketch = nest.track_sketch.toString("base64");
     }
+
+    redactLocationFields(nest, req.user?.role, await getNestLocationVisibility());
 
     res.json({
       message: "Nest found",
@@ -4666,6 +4736,9 @@ app.get("/nest-events", async (req, res) => {
       [codes]
     );
 
+    const visibility = await getNestLocationVisibility();
+    redactLocationRows(result.rows, req.user?.role, visibility);
+
     const eventsByCode = {};
     for (const code of codes) eventsByCode[code] = [];
     for (const row of result.rows) {
@@ -4704,6 +4777,7 @@ app.get("/nest-events/:nest_code", async (req, res) => {
     `;
 
     const result = await db.query(sql, [nest_code]);
+    redactLocationRows(result.rows, req.user?.role, await getNestLocationVisibility());
 
     res.json({
       message: "Nest events retrieved successfully",
@@ -5028,6 +5102,7 @@ app.get("/emergences", async (req, res) => {
     `;
 
     const result = await db.query(sql);
+    redactLocationRows(result.rows, req.user?.role, await getNestLocationVisibility());
 
     res.json({
       message: "Emergences fetched successfully",
@@ -5057,6 +5132,8 @@ app.get("/emergences/:id", async (req, res) => {
     if (emergence.track_sketch) {
       emergence.track_sketch = emergence.track_sketch.toString("base64");
     }
+
+    redactLocationFields(emergence, req.user?.role, await getNestLocationVisibility());
 
     res.json({
       message: "Emergence fetched successfully",
@@ -6481,10 +6558,15 @@ app.get("/morning-surveys/:id", async (req, res) => {
       [id]
     );
 
+    const visibility = await getNestLocationVisibility();
+    const survey = redactLocationFields({ ...surveyResult.rows[0] }, req.user?.role, visibility);
+    redactLocationRows(nestsResult.rows, req.user?.role, visibility);
+    redactLocationRows(emergencesResult.rows, req.user?.role, visibility);
+
     res.json({
       message: "Survey fetched successfully",
       survey: {
-        ...surveyResult.rows[0],
+        ...survey,
         nests: nestsResult.rows,
         emergences: emergencesResult.rows
       }

@@ -77,7 +77,11 @@ describe('nest photos', () => {
   describe('listing', () => {
     it('returns metadata and sizes, never the image bytes', async () => {
       query.mockResolvedValue({ rows: [{ id: 1, caption: 'Cage', size_bytes: 4211 }] });
-      const res = await request(app).get('/nests/4/photos').set('Authorization', `Bearer ${tokenFor('Field Volunteer')}`);
+      // GD-003: in the default restricted mode photo routes 403 a Field
+      // Volunteer outright, so this format-only assertion uses a role that
+      // keeps access - see regression-gd003-location-visibility.test.js for
+      // the role-gated behaviour itself.
+      const res = await request(app).get('/nests/4/photos').set('Authorization', `Bearer ${tokenFor('Field Leader')}`);
       expect(res.status).toBe(200);
       // Opening a nest with a season of photos must not download all of them.
       expect(query.mock.calls[0][0]).toMatch(/octet_length\(image\)/);
@@ -94,7 +98,8 @@ describe('nest photos', () => {
   describe('serving one photo', () => {
     it('sends bytes with the stored content type, not base64 JSON', async () => {
       query.mockResolvedValue({ rows: [{ image: Buffer.from(TINY_PNG, 'base64'), mime_type: 'image/png' }] });
-      const res = await request(app).get('/nest-photos/9').set('Authorization', `Bearer ${tokenFor('Field Volunteer')}`);
+      // GD-003: see the note above on the metadata-listing test.
+      const res = await request(app).get('/nest-photos/9').set('Authorization', `Bearer ${tokenFor('Field Leader')}`);
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/image\/png/);
       expect(res.body).toBeInstanceOf(Buffer);
