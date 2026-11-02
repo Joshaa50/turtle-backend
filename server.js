@@ -470,6 +470,12 @@ const RECORDERS = [COORDINATOR, LEADER, "Field Assistant", "Field Volunteer"];
 const VOLUNTEER = "Field Volunteer";
 const REVIEWERS = [COORDINATOR, LEADER];
 
+// GD-002: the Gemini AI endpoints (nest-query, analyze-audio) send field data
+// and voice recordings to a third party, so they are narrower than RECORDERS -
+// no Field Volunteer. This mirrors the roles GD-003 plans to grant exact GPS
+// access to.
+const AI_ROLES = [COORDINATOR, LEADER, "Field Assistant"];
+
 // ---------------------------------------------------------------------------
 // Audit trail
 //
@@ -6503,8 +6509,14 @@ class AiNotConfiguredError extends Error {
   }
 }
 
+// GD-002: a GEMINI_API_KEY alone used to turn these routes on for every
+// deployment that happened to have one set, with no explicit opt-in. Same
+// post-GD-001 pattern as DEMO_LOGIN_ENABLED - default off, only exactly "on"
+// enables it.
+const AI_FEATURES_ENABLED = String(process.env.AI_FEATURES || "off").toLowerCase() === "on";
+
 const getAiClient = () => {
-  if (!process.env.GEMINI_API_KEY) {
+  if (!AI_FEATURES_ENABLED || !process.env.GEMINI_API_KEY) {
     throw new AiNotConfiguredError();
   }
   return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -7081,11 +7093,19 @@ app.post("/alerts/acknowledge-all", async (req, res) => {
   }
 });
 
-app.post("/ai/nest-query", async (req, res) => {
+// Nest counts above this are rejected rather than silently sent to Google -
+// the demo runs under 100, so 200 comfortably covers real usage while
+// bounding the payload leaving this server.
+const AI_NEST_QUERY_MAX_NESTS = 200;
+
+app.post("/ai/nest-query", requireRole(...AI_ROLES), async (req, res) => {
   try {
     const { query, nests } = req.body;
     if (!query || typeof query !== "string") {
       return res.status(400).json({ error: "Missing 'query'." });
+    }
+    if (Array.isArray(nests) && nests.length > AI_NEST_QUERY_MAX_NESTS) {
+      return res.status(400).json({ error: `Too many nests (max ${AI_NEST_QUERY_MAX_NESTS}).` });
     }
 
     const ai = getAiClient();
@@ -7169,7 +7189,7 @@ ${JSON.stringify((nests || []).map((n) => ({
 });
 
 // Voice logging of nest inventory stages -> { results: [...] }
-app.post("/ai/analyze-audio", async (req, res) => {
+app.post("/ai/analyze-audio", requireRole(...AI_ROLES), async (req, res) => {
   try {
     const { audioBase64, mimeType } = req.body;
     if (!audioBase64) {
