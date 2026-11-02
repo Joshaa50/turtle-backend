@@ -1728,6 +1728,86 @@ app.delete("/nest-photos/:photoId", requireRole(...REVIEWERS), async (req, res) 
 const erasedEmailFor = (id) => `erased-${id}@removed.invalid`;
 const ERASED_NAME = "Removed";
 
+// Observer is free text, typed by a volunteer, and may name more than one
+// person at once ("Maria Karydi, Nikos Floros" or "... & ..." or "... and
+// ..."). These helpers are the single place that knows how to split, match,
+// and rebuild that string, so export / erase / the retention sweep cannot
+// drift on what counts as a match for one of several names in a value.
+const OBSERVER_SEPARATOR_RE = /(\s*,\s*|\s*&\s*|\s+and\s+)/i;
+const splitObserverSegments = (value) => String(value ?? "").split(OBSERVER_SEPARATOR_RE);
+const normalizeObserverName = (name) => String(name ?? "").trim().toLowerCase();
+
+// `namesLower` is a Set of normalized names (full name + any Coordinator-
+// supplied aliases) this person is known by.
+const matchedObserverSegments = (observerValue, namesLower) =>
+  splitObserverSegments(observerValue)
+    .filter((_, i) => i % 2 === 0)
+    .filter((seg) => namesLower.has(normalizeObserverName(seg)));
+
+// Replaces only the segment(s) naming this person, leaving every other name
+// and separator exactly as typed - erasing Maria from "Maria Karydi, Nikos
+// Floros" yields "Removed, Nikos Floros", never the whole value.
+const replaceObserverNames = (observerValue, namesLower) => {
+  let matched = false;
+  const value = splitObserverSegments(observerValue)
+    .map((part, i) => {
+      if (i % 2 !== 0) return part; // separator, unchanged
+      if (namesLower.has(normalizeObserverName(part))) {
+        matched = true;
+        return ERASED_NAME;
+      }
+      return part;
+    })
+    .join("");
+  return { matched, value };
+};
+
+// Escapes LIKE/ILIKE metacharacters so a name containing "%" or "_" cannot
+// turn into an unintended wildcard.
+const likeEscape = (s) => String(s).replace(/[%_\\]/g, (c) => `\\${c}`);
+
+const OBSERVER_TABLES = [
+  { table: "turtle_survey_events", columns: "id, event_date, event_type, location, observer" },
+  { table: "turtle_nest_events", columns: "id, event_type, observer" },
+];
+
+// Finds every row across both observer-bearing tables whose observer string
+// names this person, case-insensitively and trimmed, by full name or alias,
+// whether they are the only name on the record or one of several. The ILIKE
+// scan is a superset (it also catches "Maria Karydick"), never a subset, so
+// filtering the real, segment-exact match in JS afterwards cannot hide a
+// true match while still discarding substring false positives.
+const findObserverMatches = async (executor, names) => {
+  const namesLower = new Set(names.filter(Boolean).map(normalizeObserverName));
+  if (namesLower.size === 0) return { namesLower, byTable: {} };
+
+  const candidates = Array.from(namesLower).map((n) => `%${likeEscape(n)}%`);
+  const byTable = {};
+  for (const { table, columns } of OBSERVER_TABLES) {
+    const whereIlike = candidates.map((_, i) => `observer ILIKE $${i + 1}`).join(" OR ");
+    const r = await executor.query(
+      `SELECT ${columns} FROM ${table} WHERE observer IS NOT NULL AND (${whereIlike});`,
+      candidates
+    );
+    byTable[table] = r.rows.filter((row) => matchedObserverSegments(row.observer, namesLower).length > 0);
+  }
+  return { namesLower, byTable };
+};
+
+// A second, unrelated person can legally share this exact name. `is_active`
+// is deliberately not filtered: an already-erased account is named "Removed"
+// (never this person's real name) so it cannot false-positive here, but a
+// second *real* person with the same name - active or not - still must.
+const countOtherUsersWithName = async (executor, excludeId, fullName) => {
+  if (!fullName) return 0;
+  const r = await executor.query(
+    `SELECT COUNT(*)::int AS n FROM users
+     WHERE id <> $1 AND LOWER(TRIM(CONCAT(first_name, ' ', last_name))) = LOWER(TRIM($2));`,
+    [excludeId, fullName]
+  );
+  return r.rows[0]?.n ?? 0;
+};
+
 // The GDPR erasure itself, shared by the coordinator-initiated route and the
 // automatic retention sweep below - one implementation, so a change to what
 // gets erased can never drift between the two paths.
@@ -1737,7 +1817,11 @@ const ERASED_NAME = "Removed";
 // last_name, email, role}) - fetched `FOR UPDATE` by the caller, so this
 // never races a second erasure of the same account. Guards against erasing
 // the last active coordinator regardless of who or what triggered it.
-const eraseUserRow = async (client, person, { req, summary }) => {
+const eraseUserRow = async (
+  client,
+  person,
+  { req, summary, aliases = [], includeObserverRecords = false }
+) => {
   if (person.role === COORDINATOR) {
     const others = await client.query(
       `SELECT COUNT(*)::int AS n FROM users WHERE role = $1 AND is_active = true AND id <> $2;`,
@@ -1751,6 +1835,12 @@ const eraseUserRow = async (client, person, { req, summary }) => {
   const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
   const unusable = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
 
+  // A second, real person can legally share this exact name - in which case
+  // their observer records must not be touched by someone else's erasure
+  // unless a Coordinator has reviewed and confirmed it with
+  // includeObserverRecords.
+  const ambiguous = (await countOtherUsersWithName(client, person.id, fullName)) > 0;
+
   await client.query(
     `UPDATE users
      SET first_name = $1, last_name = '', email = $2, profile_picture = NULL,
@@ -1760,20 +1850,29 @@ const eraseUserRow = async (client, person, { req, summary }) => {
   );
 
   const shifts = await client.query(`DELETE FROM Timetable WHERE user_id = $1;`, [person.id]);
+  const rosterRows = await client.query(`DELETE FROM roster_template_rows WHERE user_id = $1;`, [person.id]);
 
   const audit = await client.query(
     `UPDATE record_audit SET actor_email = NULL WHERE actor_id = $1 RETURNING id;`,
     [person.id]
   );
 
-  let observerRows = 0;
+  const observerReplaced = { turtle_survey_events: 0, turtle_nest_events: 0 };
+  const observerSkipped = [];
   if (fullName) {
-    for (const table of ["turtle_survey_events", "turtle_nest_events"]) {
-      const r = await client.query(
-        `UPDATE ${table} SET observer = $1 WHERE observer = $2 RETURNING id;`,
-        [ERASED_NAME, fullName]
-      );
-      observerRows += r.rowCount;
+    const { namesLower, byTable } = await findObserverMatches(client, [fullName, ...aliases]);
+    const canTouch = !ambiguous || includeObserverRecords;
+    for (const { table } of OBSERVER_TABLES) {
+      for (const row of byTable[table] || []) {
+        if (!canTouch) {
+          observerSkipped.push({ table, id: row.id });
+          continue;
+        }
+        const { matched, value } = replaceObserverNames(row.observer, namesLower);
+        if (!matched) continue;
+        await client.query(`UPDATE ${table} SET observer = $1 WHERE id = $2;`, [value, row.id]);
+        observerReplaced[table] += 1;
+      }
     }
   }
 
@@ -1785,13 +1884,22 @@ const eraseUserRow = async (client, person, { req, summary }) => {
     summary,
   });
 
+  const totalReplaced = observerReplaced.turtle_survey_events + observerReplaced.turtle_nest_events;
+
   return {
     erased: {
       account: Number(person.id),
       shift_assignments_deleted: shifts.rowCount,
+      roster_rows_deleted: rosterRows.rowCount,
       audit_entries_de_identified: audit.rowCount,
-      field_records_observer_replaced: observerRows,
+      // Kept as a combined number for existing callers, plus a per-table
+      // breakdown now that a replacement can be partial (one of several
+      // names in a value) or skipped entirely (an ambiguous name).
+      field_records_observer_replaced: totalReplaced,
+      field_records_observer_replaced_by_table: observerReplaced,
     },
+    ambiguous_name: ambiguous,
+    ...(ambiguous && !includeObserverRecords ? { observer_records_skipped: observerSkipped } : {}),
   };
 };
 
@@ -1810,21 +1918,31 @@ app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => 
     const person = account.rows[0];
     const fullName = `${person.first_name || ""} ${person.last_name || ""}`.trim();
 
+    // GET has no JSON body, so aliases the Coordinator knows about (a
+    // nickname, "M. Karydi") travel as a comma-separated query param.
+    const aliasesParam = typeof req.query.observer_aliases === "string" ? req.query.observer_aliases : "";
+    const aliases = aliasesParam.split(",").map((a) => a.trim()).filter(Boolean);
+
     // Everything that names this person, not merely everything keyed to their
     // id: the observer columns hold a typed name, so an export keyed only on
     // user_id would quietly miss the records they are actually named on.
-    const [shifts, submitted, reviewed, audit, turtleEvents, nestEvents] = await Promise.all([
+    const [shifts, submitted, reviewed, audit] = await Promise.all([
       db.query(`SELECT * FROM Timetable WHERE user_id = $1 ORDER BY work_date DESC;`, [id]),
       db.query(`SELECT * FROM record_reviews WHERE submitted_by = $1 ORDER BY submitted_at DESC;`, [id]),
       db.query(`SELECT * FROM record_reviews WHERE reviewed_by = $1 ORDER BY submitted_at DESC;`, [id]),
       db.query(`SELECT * FROM record_audit WHERE actor_id = $1 ORDER BY occurred_at DESC;`, [id]),
-      fullName
-        ? db.query(`SELECT id, event_date, event_type, location, observer FROM turtle_survey_events WHERE observer = $1;`, [fullName])
-        : Promise.resolve({ rows: [] }),
-      fullName
-        ? db.query(`SELECT id, event_type, observer FROM turtle_nest_events WHERE observer = $1;`, [fullName])
-        : Promise.resolve({ rows: [] }),
     ]);
+
+    let ambiguous = false;
+    let fieldwork = { turtle_encounters: [], nest_events: [] };
+    if (fullName) {
+      ambiguous = (await countOtherUsersWithName(db, person.id, fullName)) > 0;
+      const { byTable } = await findObserverMatches(db, [fullName, ...aliases]);
+      fieldwork = {
+        turtle_encounters: byTable.turtle_survey_events || [],
+        nest_events: byTable.turtle_nest_events || [],
+      };
+    }
 
     res.json({
       exported_at: new Date().toISOString(),
@@ -1834,12 +1952,19 @@ app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => 
       records_submitted_for_review: submitted.rows,
       reviews_they_decided: reviewed.rows,
       actions_in_the_audit_trail: audit.rows,
+      ambiguous_name: ambiguous,
       // Named, not owned. These are turtle records that happen to carry this
-      // person's name as the observer.
-      fieldwork_they_are_named_on: {
-        turtle_encounters: turtleEvents.rows,
-        nest_events: nestEvents.rows,
-      },
+      // person's name as the observer. When another user shares the exact
+      // same name, these matches are not asserted to belong to this person -
+      // they are surfaced separately for a Coordinator to confirm instead.
+      ...(ambiguous
+        ? {
+            fieldwork_possibly_named_on_ambiguous: {
+              ...fieldwork,
+              note: "Another user has this exact name. Confirm these records belong to this person before relying on them.",
+            },
+          }
+        : { fieldwork_they_are_named_on: fieldwork }),
       note:
         "Field records (nests, surveys, turtle encounters) are observations about animals, not personal data, and are retained. This export lists the ones this person is named on.",
     });
@@ -1856,10 +1981,13 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
   // Typing the address is the confirmation, the way deleting your own account
   // asks for a password. This cannot be undone and it is easy to run against
   // the wrong row in a list of forty-odd people.
-  const { confirm_email } = req.body || {};
+  const { confirm_email, observer_aliases, include_observer_records } = req.body || {};
   if (!confirm_email) {
     return res.status(400).json({ error: "Confirm by sending the account's email address as confirm_email." });
   }
+  const aliases = Array.isArray(observer_aliases)
+    ? observer_aliases.filter((a) => typeof a === "string" && a.trim()).map((a) => a.trim())
+    : [];
 
   let client;
   try {
@@ -1884,6 +2012,8 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     const result = await eraseUserRow(client, person, {
       req,
       summary: "Personal data erased at request; field records retained",
+      aliases,
+      includeObserverRecords: include_observer_records === true,
     });
     if (result.error === "last_coordinator") {
       await client.query("ROLLBACK");
@@ -1897,6 +2027,8 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     res.json({
       message: "Personal data erased. Field records were retained.",
       erased: result.erased,
+      ambiguous_name: result.ambiguous_name,
+      ...(result.observer_records_skipped ? { observer_records_skipped: result.observer_records_skipped } : {}),
     });
   } catch (err) {
     if (client) await client.query("ROLLBACK").catch(() => {});
@@ -2754,8 +2886,8 @@ const readNestLocationVisibilityBody = (body) => {
 // is, including a Field Volunteer's own submission.
 const LOCATION_FIELDS = [
   "gps_lat", "gps_long",
-  "tri_tl_lat", "tri_tl_long", "tri_tl_desc", "tri_tl_distance",
-  "tri_tr_lat", "tri_tr_long", "tri_tr_desc", "tri_tr_distance",
+  "tri_tl_lat", "tri_tl_long", "tri_tl_desc", "tri_tl_distance", "tri_tl_img",
+  "tri_tr_lat", "tri_tr_long", "tri_tr_desc", "tri_tr_distance", "tri_tr_img",
   "original_gps_lat", "original_gps_long",
   "reburied_gps_lat", "reburied_gps_long",
   "tl_lat", "tl_long", "tr_lat", "tr_long",

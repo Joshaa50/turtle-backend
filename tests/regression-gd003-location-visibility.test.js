@@ -35,6 +35,7 @@ const NEST_ROW = {
   id: 1, nest_code: 'LG2-1', gps_lat: '37.1', gps_long: '21.5',
   tri_tl_lat: '37.11', tri_tl_long: '21.51', tri_tl_desc: 'Rock', tri_tl_distance: '3',
   tri_tr_lat: '37.12', tri_tr_long: '21.52', tri_tr_desc: 'Tree', tri_tr_distance: '4',
+  tri_tl_img: Buffer.from('tl-photo'), tri_tr_img: Buffer.from('tr-photo'),
   submitted_by: 42,
 };
 
@@ -162,6 +163,28 @@ describe('GET /nests/:nest_code', () => {
     expect(res.status).toBe(200);
     expect(res.body.nest.gps_lat).toBeNull();
     expect(res.body.nest.location_hidden).toBe(true);
+  });
+
+  it('redacts the triangulation reference photos for a Field Volunteer in restricted mode', async () => {
+    const res = await asVolunteer(request(app).get('/nests/LG2-1'));
+    expect(res.status).toBe(200);
+    expect(res.body.nest.tri_tl_img).toBeNull();
+    expect(res.body.nest.tri_tr_img).toBeNull();
+  });
+
+  it('keeps the triangulation reference photos for AI_ROLES', async () => {
+    const res = await asLeader(request(app).get('/nests/LG2-1'));
+    expect(res.status).toBe(200);
+    expect(res.body.nest.tri_tl_img).toBe(Buffer.from('tl-photo').toString('base64'));
+    expect(res.body.nest.tri_tr_img).toBe(Buffer.from('tr-photo').toString('base64'));
+  });
+
+  it('keeps the triangulation reference photos for everyone once the setting is "open"', async () => {
+    stored.nest_location_visibility = { value: 'open' };
+    const res = await asVolunteer(request(app).get('/nests/LG2-1'));
+    expect(res.status).toBe(200);
+    expect(res.body.nest.tri_tl_img).toBe(Buffer.from('tl-photo').toString('base64'));
+    expect(res.body.nest.tri_tr_img).toBe(Buffer.from('tr-photo').toString('base64'));
   });
 });
 
