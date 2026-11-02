@@ -929,7 +929,7 @@ app.post("/users/register", accountActionLimiter, async (req, res) => {
       user: result.rows[0]
     });
   } catch (err) {
-    console.error("Register error:", err);
+    logError("Register error:", err);
     if (err.code === "23505") {
       return res.status(400).json({ error: "Email already exists." });
     }
@@ -968,7 +968,7 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
       users: result.rows
     });
   } catch (err) {
-    console.error("Get users error:", err);
+    logError("Get users error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -990,7 +990,7 @@ app.get("/users/observers", requireRole(...RECORDERS), async (req, res) => {
     );
     res.json({ users: result.rows });
   } catch (err) {
-    console.error("Get observers error:", err);
+    logError("Get observers error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -1040,7 +1040,7 @@ app.get("/users/:id", async (req, res) => {
       user
     });
   } catch (err) {
-    console.error("Get user by ID error:", err);
+    logError("Get user by ID error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -1137,7 +1137,7 @@ app.post("/users/login", loginLimiter, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("Login error:", err);
+    logError("Login error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -1160,7 +1160,7 @@ app.post("/users/logout", async (req, res) => {
     db.query("DELETE FROM revoked_tokens WHERE expires_at < NOW();").catch(() => {});
     res.json({ message: "Logged out." });
   } catch (err) {
-    console.error("Logout error:", err);
+    logError("Logout error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -1228,7 +1228,7 @@ app.post("/demo/login", demoLoginLimiter, async (req, res) => {
 
     res.json({ message: "Demo login successful", token: signToken(user, { demo: true }), user });
   } catch (err) {
-    console.error("Demo login error:", err);
+    logError("Demo login error:", err);
     res.status(500).json({ error: "Server error." });
   }
 });
@@ -1251,7 +1251,7 @@ app.post("/users/request-password-reset", accountActionLimiter, async (req, res)
     );
     res.json(generic);
   } catch (err) {
-    console.error("Password reset request error:", err);
+    logError("Password reset request error:", err);
     res.json(generic);
   }
 });
@@ -1274,7 +1274,7 @@ app.post("/users/request-reactivation", accountActionLimiter, async (req, res) =
     );
     res.json(generic);
   } catch (err) {
-    console.error("Reactivation request error:", err);
+    logError("Reactivation request error:", err);
     res.json(generic);
   }
 });
@@ -1396,7 +1396,7 @@ app.patch("/users/:id", async (req, res) => {
         return res.status(403).json({ error: "Your current password is incorrect." });
       }
     } catch (err) {
-      console.error("Password change verification error:", err);
+      logError("Password change verification error:", err);
       return res.status(500).json({ error: "Server error." });
     }
   }
@@ -1475,7 +1475,7 @@ app.patch("/users/:id", async (req, res) => {
       user: result.rows[0]
     });
   } catch (err) {
-    console.error("Update error:", err);
+    logError("Update error:", err);
     if (err.code === "23505") {
       return res.status(400).json({ error: "Email already in use by another account." });
     }
@@ -1554,7 +1554,7 @@ app.delete("/users/:id", async (req, res) => {
     res.json({ message: "Account deleted." });
   } catch (err) {
     if (client) await client.query("ROLLBACK").catch(() => {});
-    console.error("Delete account error:", err);
+    logError("Delete account error:", err);
     res.status(500).json({ error: "Server error." });
   } finally {
     if (client) client.release();
@@ -1839,6 +1839,13 @@ const countOtherUsersWithName = async (executor, excludeId, fullName) => {
   return r.rows[0]?.n ?? 0;
 };
 
+// Logs only the error code, constraint name, and message - never the full
+// error object. Postgres puts submitted values (e.g. a duplicate email) into
+// `detail`/`hint`/`where`, so logging `err` whole on auth/account routes can
+// leak PII into the server logs.
+const logError = (label, err) =>
+  console.error(label, { code: err?.code, constraint: err?.constraint, message: err?.message });
+
 // The GDPR erasure itself, shared by the coordinator-initiated route and the
 // automatic retention sweep below - one implementation, so a change to what
 // gets erased can never drift between the two paths.
@@ -2000,7 +2007,7 @@ app.get("/users/:id/data-export", requireRole(COORDINATOR), async (req, res) => 
         "Field records (nests, surveys, turtle encounters) are observations about animals, not personal data, and are retained. This export lists the ones this person is named on.",
     });
   } catch (err) {
-    console.error("Data export error:", err);
+    logError("Data export error:", err);
     res.status(500).json({ error: "Server error while building the export." });
   }
 });
@@ -2063,7 +2070,7 @@ app.post("/users/:id/erase", requireRole(COORDINATOR), async (req, res) => {
     });
   } catch (err) {
     if (client) await client.query("ROLLBACK").catch(() => {});
-    console.error("Erase user error:", err);
+    logError("Erase user error:", err);
     res.status(500).json({ error: "Server error while erasing. Nothing was changed." });
   } finally {
     if (client) client.release();
@@ -3155,7 +3162,7 @@ const saveSetting = (key, read, after) => async (req, res) => {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW();`,
       [key, JSON.stringify(parsed.value), req.user?.id ?? null]
     );
-    console.log(`Setting ${key} changed by ${req.user?.email}.`);
+    console.log(`Setting ${key} changed by user ${req.user?.id}.`);
     res.json(await after());
   } catch (err) {
     console.error(`Save setting ${key} error:`, err);
