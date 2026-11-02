@@ -18,11 +18,28 @@ beforeEach(() => {
 });
 afterAll(() => db.end().catch(() => {}));
 
-/** Makes the transaction find PERSON and answer the coordinator-count check. */
-const stubEraseFlow = ({ person = PERSON, otherCoordinators = 3 } = {}) => {
-  client.query.mockImplementation((sql) => {
+/** Is this the "does another user share this exact name" check? */
+const isAmbiguousNameQuery = (sql) => /CONCAT\(first_name/i.test(sql);
+/** Is this the "last active coordinator" count? */
+const isCoordinatorCountQuery = (sql) => /role = \$1 AND is_active = true/i.test(sql);
+
+/**
+ * Makes the transaction find PERSON, answer the coordinator-count check, the
+ * ambiguous-name check, and (by default) no observer-table matches.
+ */
+const stubEraseFlow = ({
+  person = PERSON,
+  otherCoordinators = 3,
+  otherSameName = 0,
+  surveyRows = [],
+  nestRows = [],
+} = {}) => {
+  client.query.mockImplementation((sql, params) => {
     if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [person], rowCount: 1 });
-    if (/COUNT\(\*\)/i.test(sql)) return Promise.resolve({ rows: [{ n: otherCoordinators }], rowCount: 1 });
+    if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: otherSameName }], rowCount: 1 });
+    if (isCoordinatorCountQuery(sql)) return Promise.resolve({ rows: [{ n: otherCoordinators }], rowCount: 1 });
+    if (/FROM turtle_survey_events/i.test(sql)) return Promise.resolve({ rows: surveyRows, rowCount: surveyRows.length });
+    if (/FROM turtle_nest_events/i.test(sql)) return Promise.resolve({ rows: nestRows, rowCount: nestRows.length });
     return Promise.resolve({ rows: [], rowCount: 0 });
   });
 };
@@ -52,15 +69,77 @@ describe('subject access export', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/password/i);
   });
 
-  it('searches the observer columns by name, not only by user id', async () => {
-    // Observer is a typed name, so an export keyed only on user_id would miss
-    // the records the person is actually named on.
-    query.mockResolvedValue({ rows: [PERSON] });
-    await request(app).get('/users/21/data-export').set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`);
-    const byName = query.mock.calls.filter(([sql, params]) =>
-      /observer = \$1/.test(sql) && params?.[0] === "Liam O'Connor"
-    );
-    expect(byName.length).toBeGreaterThan(0);
+  it('searches the observer columns by name, case-insensitively, not only by user id', async () => {
+    // Observer is a typed, free-text name, so an export keyed only on
+    // user_id would miss the records the person is actually named on, and
+    // exact-equality would miss "liam o'connor" typed in lowercase.
+    query.mockImplementation((sql) => {
+      if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [PERSON], rowCount: 1 });
+      if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: 0 }], rowCount: 1 });
+      if (/FROM turtle_survey_events/i.test(sql)) {
+        return Promise.resolve({
+          rows: [{ id: 5, event_date: '2024-05-01', event_type: 'encounter', location: 'North Beach', observer: "liam o'connor" }],
+          rowCount: 1,
+        });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+    const res = await request(app).get('/users/21/data-export').set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`);
+    expect(res.status).toBe(200);
+    expect(res.body.ambiguous_name).toBe(false);
+    expect(res.body.fieldwork_they_are_named_on.turtle_encounters.map((r) => r.id)).toEqual([5]);
+  });
+
+  it('finds a multi-person observer value by one of the names in it', async () => {
+    query.mockImplementation((sql) => {
+      if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [PERSON], rowCount: 1 });
+      if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: 0 }], rowCount: 1 });
+      if (/FROM turtle_nest_events/i.test(sql)) {
+        return Promise.resolve({
+          rows: [{ id: 9, event_type: 'nest_found', observer: "Liam O'Connor, Nikos Floros" }],
+          rowCount: 1,
+        });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+    const res = await request(app).get('/users/21/data-export').set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`);
+    expect(res.body.fieldwork_they_are_named_on.nest_events.map((r) => r.id)).toEqual([9]);
+  });
+
+  it('matches a record via a Coordinator-supplied alias, not the real name', async () => {
+    query.mockImplementation((sql) => {
+      if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [PERSON], rowCount: 1 });
+      if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: 0 }], rowCount: 1 });
+      if (/FROM turtle_survey_events/i.test(sql)) {
+        return Promise.resolve({
+          rows: [{ id: 7, event_date: '2024-05-02', event_type: 'encounter', location: 'South Beach', observer: 'L. O\'Connor' }],
+          rowCount: 1,
+        });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+    const res = await request(app)
+      .get('/users/21/data-export?observer_aliases=L.%20O%27Connor')
+      .set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`);
+    expect(res.body.fieldwork_they_are_named_on.turtle_encounters.map((r) => r.id)).toEqual([7]);
+  });
+
+  it('flags an ambiguous name and keeps the possibly-matched records separate, not asserted as this person\'s', async () => {
+    query.mockImplementation((sql) => {
+      if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [PERSON], rowCount: 1 });
+      if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: 1 }], rowCount: 1 });
+      if (/FROM turtle_survey_events/i.test(sql)) {
+        return Promise.resolve({
+          rows: [{ id: 11, event_date: '2024-05-03', event_type: 'encounter', location: 'East Beach', observer: "Liam O'Connor" }],
+          rowCount: 1,
+        });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+    const res = await request(app).get('/users/21/data-export').set('Authorization', `Bearer ${tokenFor('Project Coordinator')}`);
+    expect(res.body.ambiguous_name).toBe(true);
+    expect(res.body.fieldwork_they_are_named_on).toBeUndefined();
+    expect(res.body.fieldwork_possibly_named_on_ambiguous.turtle_encounters.map((r) => r.id)).toEqual([11]);
   });
 });
 
@@ -141,6 +220,19 @@ describe('erasure', () => {
     expect(sqls.some((s) => /DELETE FROM Timetable WHERE user_id/i.test(s))).toBe(true);
   });
 
+  it('also deletes this person\'s roster template rows, and counts them', async () => {
+    client.query.mockImplementation((sql) => {
+      if (/FROM users WHERE id/i.test(sql)) return Promise.resolve({ rows: [PERSON], rowCount: 1 });
+      if (isAmbiguousNameQuery(sql)) return Promise.resolve({ rows: [{ n: 0 }], rowCount: 1 });
+      if (isCoordinatorCountQuery(sql)) return Promise.resolve({ rows: [{ n: 3 }], rowCount: 1 });
+      if (/DELETE FROM roster_template_rows WHERE user_id/i.test(sql)) return Promise.resolve({ rows: [], rowCount: 2 });
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+    const res = await erase({ confirm_email: PERSON.email });
+    expect(client.query.mock.calls.some(([s]) => /DELETE FROM roster_template_rows WHERE user_id/i.test(s))).toBe(true);
+    expect(res.body.erased.roster_rows_deleted).toBe(2);
+  });
+
   it('de-identifies the audit trail without erasing that something happened', async () => {
     stubEraseFlow();
     await erase({ confirm_email: PERSON.email });
@@ -149,12 +241,69 @@ describe('erasure', () => {
     expect(sqls.some((s) => /DELETE FROM record_audit/i.test(s))).toBe(false);
   });
 
-  it('replaces the typed observer name in field records', async () => {
-    stubEraseFlow();
-    await erase({ confirm_email: PERSON.email });
-    const observerUpdates = client.query.mock.calls.filter(([s]) => /SET observer = \$1/i.test(s));
+  it('replaces the typed observer name in field records, case-insensitively', async () => {
+    stubEraseFlow({
+      surveyRows: [{ id: 101, observer: "liam o'connor" }],
+      nestRows: [{ id: 202, observer: "Liam O'Connor" }],
+    });
+    const res = await erase({ confirm_email: PERSON.email });
+    const observerUpdates = client.query.mock.calls.filter(([s]) => /SET observer = \$1 WHERE id = \$2/i.test(s));
     expect(observerUpdates.length).toBe(2);
-    expect(observerUpdates[0][1]).toEqual(['Removed', "Liam O'Connor"]);
+    expect(observerUpdates.map(([, params]) => params)).toEqual(
+      expect.arrayContaining([['Removed', 101], ['Removed', 202]])
+    );
+    expect(res.body.erased.field_records_observer_replaced).toBe(2);
+    expect(res.body.erased.field_records_observer_replaced_by_table).toEqual({
+      turtle_survey_events: 1,
+      turtle_nest_events: 1,
+    });
+  });
+
+  it('replaces only this person\'s name in a multi-person observer value, keeping the other person\'s', async () => {
+    stubEraseFlow({
+      nestRows: [{ id: 303, observer: "Maria Karydi, Liam O'Connor" }],
+    });
+    const res = await erase({ confirm_email: PERSON.email });
+    const update = client.query.mock.calls.find(([s]) => /SET observer = \$1 WHERE id = \$2/i.test(s));
+    expect(update[1]).toEqual(['Maria Karydi, Removed', 303]);
+    expect(res.body.erased.field_records_observer_replaced).toBe(1);
+  });
+
+  it('matches an alias the Coordinator supplies, and replaces it', async () => {
+    stubEraseFlow({
+      surveyRows: [{ id: 404, observer: 'L. OConnor' }],
+    });
+    const res = await erase({ confirm_email: PERSON.email, observer_aliases: ['L. OConnor'] });
+    const update = client.query.mock.calls.find(([s]) => /SET observer = \$1 WHERE id = \$2/i.test(s));
+    expect(update[1]).toEqual(['Removed', 404]);
+    expect(res.body.erased.field_records_observer_replaced).toBe(1);
+  });
+
+  it('an ambiguous name: erases the account but leaves observer records untouched by default', async () => {
+    stubEraseFlow({
+      otherSameName: 1,
+      surveyRows: [{ id: 501, observer: "Liam O'Connor" }],
+    });
+    const res = await erase({ confirm_email: PERSON.email });
+    expect(res.status).toBe(200);
+    expect(res.body.ambiguous_name).toBe(true);
+    expect(res.body.observer_records_skipped).toEqual([{ table: 'turtle_survey_events', id: 501 }]);
+    const update = client.query.mock.calls.find(([s]) => /SET observer = \$1 WHERE id = \$2/i.test(s));
+    expect(update).toBeUndefined();
+    // The account itself is still de-identified even when the name is ambiguous.
+    expect(client.query.mock.calls.some(([s]) => /UPDATE users\s+SET first_name/i.test(s))).toBe(true);
+  });
+
+  it('an ambiguous name with include_observer_records: true proceeds with the replacement', async () => {
+    stubEraseFlow({
+      otherSameName: 1,
+      surveyRows: [{ id: 601, observer: "Liam O'Connor" }],
+    });
+    const res = await erase({ confirm_email: PERSON.email, include_observer_records: true });
+    expect(res.body.ambiguous_name).toBe(true);
+    expect(res.body.observer_records_skipped).toBeUndefined();
+    const update = client.query.mock.calls.find(([s]) => /SET observer = \$1 WHERE id = \$2/i.test(s));
+    expect(update[1]).toEqual(['Removed', 601]);
   });
 
   it('rolls back and reports nothing changed when a step fails', async () => {
