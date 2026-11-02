@@ -15,8 +15,20 @@ const jwt = require("jsonwebtoken");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
+const helmet = require("helmet");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const app = express();
+
+// GD-007: Render puts this app behind its own reverse proxy, so without this
+// every request arrives from Render's proxy IP, not the visitor's - which
+// would make every IP-based rate limit below count the whole site as one
+// caller. `1` trusts exactly one hop (Render's proxy) for X-Forwarded-For.
+app.set("trust proxy", 1);
+// Stops the server from announcing "Express" (and nothing else) to anyone
+// probing for known Express vulnerabilities to target.
+app.disable("x-powered-by");
+app.use(helmet());
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -613,11 +625,17 @@ const REVIEWABLE = {
 // Only these origins may call the API with credentials. Requests with no Origin
 // header (curl, server-to-server, health checks) still reach requireAuth, which
 // is what actually protects the data - CORS is a browser policy, not a lock.
-const ALLOWED_ORIGINS = [
-  "https://joshaa50.github.io",
-  "http://localhost:3000",   // vite dev (see turtle-frontend/vite.config.ts)
-  "http://localhost:4173",   // vite preview
-];
+// GD-007: a comma-separated env var, so a new customer deployment can allow
+// its own frontend origin without a code edit. Falls back to this project's
+// own demo list - today's hard-coded default - so nothing breaks for anyone
+// who hasn't set the env var yet.
+const ALLOWED_ORIGINS = (
+  process.env.ALLOWED_ORIGINS ||
+  "https://joshaa50.github.io,http://localhost:3000,http://localhost:4173"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 app.use(
   cors({
@@ -628,8 +646,71 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: '10mb' })); 
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// GD-007: rate limiting
+//--------------------------------------------------------------
+// A generic 429 everywhere, same as the login route's uniform "Invalid email
+// or password." - a limiter that said *which* threshold tripped would be
+// telling an attacker exactly what to dial back.
+const RATE_LIMIT_MESSAGE = { error: "Too many attempts, try again later." };
+const rateLimitDefaults = {
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: RATE_LIMIT_MESSAGE,
+};
+
+// The test suite's supertest calls all land on the one address (there is no
+// real network hop), so a whole file's worth of legitimate requests - far
+// more than any real caller would send - would otherwise trip these limits
+// on request count alone. Scaled up rather than switched off, so the
+// middleware is still genuinely wired in under test (see
+// regression-gd007-rate-limiting-lockout.test.js's header checks) and the
+// per-account lockout below - the thing actually under test in most of
+// those requests - isn't masked by an unrelated 429 from this layer.
+const isTestEnv = process.env.NODE_ENV === "test";
+const scaleLimit = (n) => (isTestEnv ? n * 1000 : n);
+
+// Login is the one route worth keying on more than the caller's IP: keying
+// on IP alone lets an attacker spread a password-guessing run for one victim
+// across many addresses, and keying on email alone lets one IP exhaust every
+// other account's budget. Keying on both together closes both gaps without
+// touching the other account's budget.
+const loginLimiter = rateLimit({
+  ...rateLimitDefaults,
+  windowMs: 15 * 60 * 1000,
+  limit: scaleLimit(10),
+  keyGenerator: (req) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    return `${ipKeyGenerator(req.ip)}:${email}`;
+  },
+});
+
+const demoLoginLimiter = rateLimit({
+  ...rateLimitDefaults,
+  windowMs: 15 * 60 * 1000,
+  limit: scaleLimit(20),
+});
+
+// Registration, password reset and reactivation requests all let an
+// unauthenticated caller trigger side effects (an email, a new account) -
+// cheap per-IP limit rather than per-account, since there is no account yet
+// (or, for reset/reactivation, the whole point is answering identically
+// whether or not one exists).
+const accountActionLimiter = rateLimit({
+  ...rateLimitDefaults,
+  windowMs: 60 * 60 * 1000,
+  limit: scaleLimit(5),
+});
+
+const generalLimiter = rateLimit({
+  ...rateLimitDefaults,
+  windowMs: 15 * 60 * 1000,
+  limit: scaleLimit(300),
+});
+app.use(generalLimiter);
+
 app.use(requireAuth);
 
 // Connect to Neon
@@ -701,6 +782,23 @@ if (require.main === module) {
   })();
 }
 
+// GD-007: account lockout. Independent of the IP-based login rate limit
+// above - that one is per-IP, this is per-account, so a distributed guessing
+// attempt against a single victim's password still gets shut down even if
+// spread across many addresses. Additive and idempotent, same pattern as
+// privacy_notice_accepted_at above.
+if (require.main === module) {
+  (async () => {
+    try {
+      await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_count INTEGER DEFAULT 0;");
+      await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;");
+      console.log("users.failed_login_count / users.locked_until are present.");
+    } catch (err) {
+      console.error("Could not ensure users lockout columns:", err.message);
+    }
+  })();
+}
+
 // "Inactive" cannot be measured without a record of when someone last
 // actually used the app. Set on every real login (never on a demo one - see
 // the retention sweep below); a person who was invited and never signed in
@@ -763,7 +861,7 @@ if (require.main === module) {
 }
 
 // Register endpoint
-app.post("/users/register", async (req, res) => {
+app.post("/users/register", accountActionLimiter, async (req, res) => {
   try {
     const { first_name, last_name, email, password, station, is_password_reset_needed, privacy_notice_accepted } = req.body;
 
@@ -940,7 +1038,7 @@ app.get("/users/:id", async (req, res) => {
 });
 
 // Login endpoint
-app.post("/users/login", async (req, res) => {
+app.post("/users/login", loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
@@ -951,8 +1049,43 @@ app.post("/users/login", async (req, res) => {
     if (result.rows.length === 0) return res.status(401).json({ error: "Invalid email or password." });
 
     const user = result.rows[0];
+
+    // GD-007: account lockout, independent of the IP-based rate limit on this
+    // route - checked before the password so a locked account cannot be used
+    // to keep probing for the right password while locked. Deliberately
+    // vague: it says nothing about when the lock lifts, the same way the
+    // plain wrong-password case says nothing about which part was wrong.
+    if (user.locked_until && new Date(user.locked_until) > new Date()) {
+      return res.status(429).json({ error: "Too many failed attempts. Try again later." });
+    }
+
     const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) return res.status(401).json({ error: "Invalid email or password." });
+    if (!match) {
+      const failedCount = (user.failed_login_count || 0) + 1;
+      const lockingNow = failedCount >= 10;
+      // Awaited (unlike the best-effort last_login_at update below) because
+      // the next request's lockout decision depends on this count actually
+      // having landed - a fire-and-forget write here would let a fast-enough
+      // retry slip through before the previous failure was recorded. Never
+      // log the email or password here - only that an account (by id)
+      // tripped the threshold.
+      try {
+        await db.query(
+          lockingNow
+            ? "UPDATE users SET failed_login_count = $1, locked_until = NOW() + interval '15 minutes' WHERE id = $2;"
+            : "UPDATE users SET failed_login_count = $1 WHERE id = $2;",
+          [failedCount, user.id]
+        );
+      } catch (err) {
+        console.error("Could not record failed login attempt:", err.message);
+      }
+
+      if (lockingNow) {
+        console.warn(`Account ${user.id} locked after repeated failed logins.`);
+        return res.status(429).json({ error: "Too many failed attempts. Try again later." });
+      }
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
 
     // Status is only revealed once the password checks out. The client used to
     // fetch the whole user list before login to work this out, which handed
@@ -967,10 +1100,19 @@ app.post("/users/login", async (req, res) => {
       });
     }
 
-    // Best-effort: a failure here must never turn a correct password into a
-    // failed login.
-    db.query("UPDATE users SET last_login_at = NOW() WHERE id = $1;", [user.id])
-      .catch((err) => console.error("Could not record last_login_at:", err.message));
+    // Resetting the lockout state is awaited for the same reason the failed
+    // branch above is - a dangling write here could let a lockout outlive
+    // the successful login that should have cleared it. A failure here must
+    // still never turn a correct password into a failed login, so errors are
+    // logged, not thrown.
+    try {
+      await db.query(
+        "UPDATE users SET last_login_at = NOW(), failed_login_count = 0, locked_until = NULL WHERE id = $1;",
+        [user.id]
+      );
+    } catch (err) {
+      console.error("Could not record last_login_at:", err.message);
+    }
 
     res.json({
       message: "Login successful",
@@ -1047,7 +1189,7 @@ app.get("/demo/accounts", (req, res) => {
   });
 });
 
-app.post("/demo/login", async (req, res) => {
+app.post("/demo/login", demoLoginLimiter, async (req, res) => {
   if (!DEMO_LOGIN_ENABLED) {
     return res.status(403).json({ error: "Demo access is disabled." });
   }
@@ -1089,7 +1231,7 @@ app.post("/demo/login", async (req, res) => {
 // whether or not the address exists - otherwise they become a way to test which
 // emails have accounts.
 
-app.post("/users/request-password-reset", async (req, res) => {
+app.post("/users/request-password-reset", accountActionLimiter, async (req, res) => {
   const generic = { message: "If that account exists, a reset request has been sent." };
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
@@ -1106,7 +1248,7 @@ app.post("/users/request-password-reset", async (req, res) => {
   }
 });
 
-app.post("/users/request-reactivation", async (req, res) => {
+app.post("/users/request-reactivation", accountActionLimiter, async (req, res) => {
   const generic = { message: "If that account exists, your request has been sent for approval." };
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
