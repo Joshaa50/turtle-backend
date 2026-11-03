@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
@@ -13,6 +13,19 @@ const PASSWORD = 'correct horse battery staple';
 let hash;
 beforeEach(async () => {
   hash ??= await bcrypt.hash(PASSWORD, 10);
+});
+
+// GD-005: a successful login also fires a best-effort, un-awaited retention
+// due-check (see server.js) so it can never delay or fail this response.
+// Letting its promise chain dangle past the end of a test would have it
+// call db.query again after the NEXT test re-spies the mock, bleeding a
+// call into a test it has nothing to do with - so every test gets a tick
+// to let it settle against today's spy before the next one replaces it.
+afterEach(async () => {
+  for (let i = 0; i < 10; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 });
 
 const userRow = (over = {}) => ({

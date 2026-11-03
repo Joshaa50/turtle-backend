@@ -948,7 +948,7 @@ app.get("/users", requireRole(COORDINATOR, LEADER), async (req, res) => {
     // only runs from a context the coordinator themself reached, the same
     // way the manual route is coordinator-only. A Field Leader browsing the
     // team list must never trigger it as a side effect of just looking.
-    if (req.user?.role === COORDINATOR) await applyRetentionSweep(req);
+    if (req.user?.role === COORDINATOR) await runRetentionSweepIfDue();
 
     // Never `SELECT *` here: the row carries password_hash, and this response
     // is serialised straight to the client.
@@ -1121,6 +1121,13 @@ app.post("/users/login", loginLimiter, async (req, res) => {
     } catch (err) {
       console.error("Could not record last_login_at:", err.message);
     }
+
+    // Best-effort and never awaited into the response: Render's free tier
+    // can sleep for days with nobody opening User Management, the route the
+    // sweep otherwise relies on, so a real login is also a reliable moment
+    // to check. runRetentionSweepIfDue never throws, but the call itself is
+    // still fire-and-forget so a slow sweep can never delay this response.
+    runRetentionSweepIfDue().catch((err) => console.error("Retention sweep on login failed:", err.message));
 
     res.json({
       message: "Login successful",
@@ -2873,10 +2880,15 @@ const readAlertsBody = (body) => {
 // request; only when someone has been inactive past the configured number of
 // days does it get applied automatically, and the last active coordinator is
 // never touched regardless of the setting.
-const DEFAULT_RETENTION = { auto_erase_enabled: false, inactive_days: 365 };
+const DEFAULT_RETENTION = { auto_erase_enabled: true, inactive_days: 730 }; // 24 months
 
 const getRetentionSettings = async () => {
   const stored = await readSetting("retention");
+  // readSetting returns null only when nothing has ever been saved - that is
+  // the one case the new default applies. A deployment that explicitly saved
+  // auto_erase_enabled: false keeps exactly that; it must not be
+  // indistinguishable from "never configured".
+  if (!stored) return { ...DEFAULT_RETENTION };
   const days = stored?.inactive_days;
   return {
     auto_erase_enabled: stored?.auto_erase_enabled === true,
@@ -2968,11 +2980,44 @@ const dueForRetention = async (cutoffDays) => {
   return result.rows;
 };
 
-// Applied lazily when a coordinator's own request touches it (User
-// Management, the alerts bell) - the same no-scheduler-to-fail pattern as
-// auto-approve. Each account is erased in its own transaction, so one
-// failure - or the last-coordinator guard - never blocks the rest.
-const applyRetentionSweep = async (req) => {
+// The sweep is never "done by" whichever coordinator's page load or user's
+// login happened to trigger it - that would misattribute an automatic
+// erasure to a person who took no action. recordAudit (see above) already
+// falls back safely on a missing req, so a synthetic req carrying this actor
+// is enough to make the audit row say actor_role "system" with no actor_id
+// or actor_email, and needs no changes to recordAudit itself.
+const RETENTION_SYSTEM_REQ = { user: { id: null, email: null, role: "system" } };
+
+// Applied from three places: a coordinator opening User Management (the
+// original trigger, kept as a safety net), a successful login (because
+// Render's free tier can sleep for days with nobody visiting a screen that
+// would otherwise trigger it), and a daily timer while the process is
+// awake. All three funnel through runRetentionSweepIfDue so at most one
+// actual sweep happens per 24 hours regardless of which trigger fires it.
+const RETENTION_SWEEP_KEY = "retention_sweep_state";
+const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+const isRetentionSweepDue = async () => {
+  const state = await readSetting(RETENTION_SWEEP_KEY);
+  const lastRunAt = state?.last_run_at ? new Date(state.last_run_at) : null;
+  return !lastRunAt || Date.now() - lastRunAt.getTime() >= RETENTION_SWEEP_INTERVAL_MS;
+};
+
+// Written straight through the pool, not saveSetting: saveSetting is the
+// Coordinator-facing settings path and records updated_by/logs "changed by
+// user" - this is a system timestamp, not anyone's edit.
+const markRetentionSweepRan = async () => {
+  await db.query(
+    `INSERT INTO app_settings (key, value, updated_by, updated_at)
+     VALUES ($1, $2::jsonb, NULL, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();`,
+    [RETENTION_SWEEP_KEY, JSON.stringify({ last_run_at: new Date().toISOString() })]
+  );
+};
+
+// Each account is erased in its own transaction, so one failure - or the
+// last-coordinator guard - never blocks the rest.
+const applyRetentionSweep = async () => {
   try {
     const settings = await getRetentionSettings();
     if (!settings.auto_erase_enabled) return;
@@ -2988,8 +3033,8 @@ const applyRetentionSweep = async (req) => {
         );
         if (locked.rows.length === 0) { await client.query("ROLLBACK"); continue; }
         const result = await eraseUserRow(client, locked.rows[0], {
-          req,
-          summary: `Personal data erased automatically after ${settings.inactive_days} days of inactivity; field records retained`,
+          req: RETENTION_SYSTEM_REQ,
+          summary: `Personal data erased by automatic retention after ${settings.inactive_days} days of inactivity; field records retained`,
         });
         if (result.error) { await client.query("ROLLBACK"); continue; }
         await client.query("COMMIT");
@@ -3000,8 +3045,33 @@ const applyRetentionSweep = async (req) => {
         client.release();
       }
     }
+
+    // Separate from erasing a dormant account: this de-identifies old audit
+    // rows generally, on the same clock, even for users who are still
+    // active - their old actions' emails age out too rather than lingering
+    // in the trail indefinitely. Direct maintenance, not a tracked action,
+    // so it gets no recordAudit entry of its own.
+    await db.query(
+      `UPDATE record_audit SET actor_email = NULL
+       WHERE occurred_at < NOW() - ($1::int * INTERVAL '1 day') AND actor_email IS NOT NULL;`,
+      [settings.inactive_days]
+    );
   } catch (err) {
     console.error("Retention sweep failed:", err.message);
+  }
+};
+
+// Shared by every trigger (GET /users, login, the daily timer): checks the
+// once-per-24h gate and only then runs and re-stamps it. Never throws - a
+// failure here must never turn a successful login or a team-list read into
+// an error response.
+const runRetentionSweepIfDue = async () => {
+  try {
+    if (!(await isRetentionSweepDue())) return;
+    await applyRetentionSweep();
+    await markRetentionSweepRan();
+  } catch (err) {
+    console.error("Retention sweep due-check failed:", err.message);
   }
 };
 
@@ -7662,6 +7732,14 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+
+  // Extra trigger alongside GET /users and login: catches a long-lived
+  // process that nobody has touched by either route in the last 24 hours.
+  // Gated the same way as the listener - importing the module for tests
+  // must never start a timer.
+  setInterval(() => {
+    runRetentionSweepIfDue().catch((err) => console.error("Retention sweep timer failed:", err.message));
+  }, RETENTION_SWEEP_INTERVAL_MS);
 }
 
 // `db` is exported so tests can stub `db.query` on the pool instance rather

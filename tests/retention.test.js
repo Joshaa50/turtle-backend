@@ -51,9 +51,17 @@ beforeEach(() => {
 afterAll(() => db.end().catch(() => {}));
 
 describe('retention settings', () => {
-  it('defaults to off, with a year-long threshold', async () => {
+  it('defaults to on, with a 24-month threshold, on a fresh deployment', async () => {
+    // Nothing has ever been stored under key "retention" - `stored` starts
+    // empty each test, so `readSetting` returns null here, not a saved false.
     const res = await asVolunteer(request(app).get('/settings'));
-    expect(res.body.retention).toEqual({ auto_erase_enabled: false, inactive_days: 365 });
+    expect(res.body.retention).toEqual({ auto_erase_enabled: true, inactive_days: 730 });
+  });
+
+  it('keeps an explicitly-saved value, even an explicit false, rather than falling back to the new default', async () => {
+    stored.retention = { auto_erase_enabled: false, inactive_days: 400 };
+    const res = await asVolunteer(request(app).get('/settings'));
+    expect(res.body.retention).toEqual({ auto_erase_enabled: false, inactive_days: 400 });
   });
 
   it('saves valid settings', async () => {
@@ -82,7 +90,8 @@ describe('retention settings', () => {
 describe('the automatic sweep', () => {
   const dormant = { id: 21, first_name: 'Liam', last_name: "O'Connor", email: 'liam@example.com', role: 'Field Volunteer' };
 
-  it('does nothing when disabled (the default)', async () => {
+  it('does nothing when explicitly disabled', async () => {
+    stored.retention = { auto_erase_enabled: false, inactive_days: 180 };
     await asCoordinator(request(app).get('/users'));
     expect(clientQuery).not.toHaveBeenCalled();
   });
@@ -170,6 +179,82 @@ describe('the automatic sweep', () => {
     expect(res.status).toBe(200); // the read itself never fails because the sweep hiccuped
     expect(clientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
   });
+
+  it('attributes a sweep erasure to the system, not whoever\'s page load or login triggered it', async () => {
+    stored.retention = { auto_erase_enabled: true, inactive_days: 180 };
+    query.mockImplementation(async (sql, params) => {
+      const text = String(sql);
+      if (text.includes('FROM app_settings')) return { rows: params?.[0] === 'retention' ? [{ value: stored.retention }] : [] };
+      if (text.includes('COALESCE(last_login_at, created_at) AS last_activity')) return { rows: [{ ...dormant, last_activity: '2025-01-01' }] };
+      return { rows: [] };
+    });
+    clientQuery.mockImplementation(async (sql) => {
+      const text = String(sql);
+      if (text.startsWith('SELECT id, first_name')) return { rows: [dormant] };
+      if (text.includes('COUNT(*)')) return { rows: [{ n: 5 }] };
+      return { rows: [], rowCount: 0 };
+    });
+    await asCoordinator(request(app).get('/users'));
+    const auditInsert = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO record_audit'));
+    expect(auditInsert).toBeDefined();
+    const [, params] = auditInsert;
+    // actor_id, actor_email, actor_role, in that column order.
+    expect(params[3]).toBeNull();
+    expect(params[4]).toBeNull();
+    expect(params[5]).toBe('system');
+  });
+
+  it('de-identifies old audit rows generally on the same clock, even for a still-active user unrelated to any erasure', async () => {
+    stored.retention = { auto_erase_enabled: true, inactive_days: 180 };
+    await asCoordinator(request(app).get('/users'));
+    const deidentify = query.mock.calls.find(([sql]) => {
+      const text = String(sql);
+      return text.includes('UPDATE record_audit SET actor_email = NULL') && text.includes('occurred_at');
+    });
+    expect(deidentify).toBeDefined();
+    expect(deidentify[1]).toEqual([180]);
+  });
+});
+
+describe('the sweep runs without anyone opening User Management', () => {
+  const dormant = { id: 21, first_name: 'Liam', last_name: "O'Connor", email: 'liam@example.com', role: 'Field Volunteer' };
+
+  it('runs from a successful login, fire-and-forget, without delaying or failing the response', async () => {
+    stored.retention = { auto_erase_enabled: true, inactive_days: 180 };
+    const hash = await bcrypt.hash('correcthorse', 10);
+    query.mockImplementation(async (sql, params) => {
+      const text = String(sql);
+      if (text === 'SELECT * FROM users WHERE email = $1 LIMIT 1') {
+        return { rows: [{ id: 5, email: 'v@example.com', password_hash: hash, role: 'Field Volunteer', is_active: true, is_email_verified: true }] };
+      }
+      if (text.includes('FROM app_settings')) {
+        return { rows: params?.[0] && stored[params[0]] ? [{ value: stored[params[0]] }] : [] };
+      }
+      if (text.includes('INSERT INTO app_settings')) {
+        stored[params[0]] = JSON.parse(params[1]);
+        return { rows: [] };
+      }
+      if (text.includes('COALESCE(last_login_at, created_at) AS last_activity')) return { rows: [] };
+      return { rows: [] };
+    });
+
+    const res = await request(app).post('/users/login').send({ email: 'v@example.com', password: 'correcthorse' });
+    expect(res.status).toBe(200);
+
+    // Not awaited by the route - give its promise chain a tick to land
+    // before asserting the sweep actually ran off the back of this login.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(stored.retention_sweep_state?.last_run_at).toBeDefined();
+  });
+
+  it('does not run a second sweep within 24 hours of the last one', async () => {
+    stored.retention = { auto_erase_enabled: true, inactive_days: 180 };
+    stored.retention_sweep_state = { last_run_at: new Date().toISOString() };
+    await asCoordinator(request(app).get('/users'));
+    expect(clientQuery).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('COALESCE(last_login_at, created_at) AS last_activity'))).toBe(false);
+  });
 });
 
 describe('the pre-erasure warning alert', () => {
@@ -200,6 +285,7 @@ describe('the pre-erasure warning alert', () => {
   });
 
   it('is absent while retention is disabled', async () => {
+    stored.retention = { auto_erase_enabled: false, inactive_days: 180 };
     const res = await asCoordinator(request(app).get('/alerts'));
     expect(res.body.alerts.some((a) => a.kind === 'retention_warning')).toBe(false);
   });
