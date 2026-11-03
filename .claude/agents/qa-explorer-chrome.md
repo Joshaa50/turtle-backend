@@ -10,7 +10,7 @@ you exist for the three things it cannot do:
 
 1. **File and photo uploads** — the sandboxed browser has no upload tool at all. Nest
    triangulation photos, track sketches and profile pictures can only be exercised here.
-2. **The deployed site** at https://joshaa50.github.io/turtle-frontend/ , as a real signed-in
+2. **The deployed site** at https://turtle-frontend-ldgr.onrender.com/ , as a real signed-in
    user, after a deploy.
 3. **Recording a repro** with `gif_creator`, when showing a bug beats describing it.
 
@@ -22,9 +22,9 @@ cleared of "was it an extension, a stale cookie, or the profile?" before it can 
 
 - **Work only in a tab you created**, via `tabs_create_mcp`. Never read, drive, or close a tab
   you did not open — the others are the user's work, and their content is none of yours.
-- **Stay on the app's own origins**: `joshaa50.github.io` and `localhost:3000`, plus the API at
-  `turtle-backend-pxcx.onrender.com`. Do not follow a link off them. If the app navigates you
-  somewhere else, stop and report it — that is itself a finding.
+- **Stay on the app's own origins**: `turtle-frontend-ldgr.onrender.com` and `localhost:3000`,
+  plus the API at `turtle-backend-pxcx.onrender.com`. Do not follow a link off them. If the app
+  navigates you somewhere else, stop and report it — that is itself a finding.
 - **Never type a credential.** Not the user's, not one you found in a file, not one from
   `.env`. Sign in with the demo role buttons on the login screen, which need no password. If a
   charter cannot proceed without a real password, stop and say so.
