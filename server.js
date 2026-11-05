@@ -705,10 +705,18 @@ const accountActionLimiter = rateLimit({
   limit: scaleLimit(5),
 });
 
+// QA-165: this is a DoS backstop, not the thing actually guarding against
+// credential stuffing (the per-route limiters above do that) - 300 per IP
+// per 15 min turned out to be tighter than normal SPA traffic. A signed-in
+// Dashboard alone polls several endpoints a minute, several people sharing
+// one office/station IP multiply that, and every full page load costs
+// another 5-10 calls - ordinary use was tripping this within 15-25 minutes.
+// Raised well above realistic normal-use volume while still bounding a
+// runaway loop or script.
 const generalLimiter = rateLimit({
   ...rateLimitDefaults,
   windowMs: 15 * 60 * 1000,
-  limit: scaleLimit(300),
+  limit: scaleLimit(2000),
 });
 app.use(generalLimiter);
 
@@ -1293,6 +1301,17 @@ app.post("/users/request-reactivation", accountActionLimiter, async (req, res) =
 // instead, so nothing location-bearing leaves the server unauthenticated.
 app.get("/public/stats", async (req, res) => {
   try {
+    // QA-167: this used to sum every nest ever recorded while the page said
+    // "this season" - harmless while only one season existed, but once the
+    // 2024/2025 seasons were seeded (QA-162) the public total silently
+    // included them, drifting from what staff see on the Dashboard/Season
+    // Report (both scoped to the current season). Match that scope: when a
+    // current season is configured, count only nests found within it;
+    // with none configured (a fresh deployment), fall back to all-time so
+    // the page never goes blank.
+    const { seasons, current } = await getSeasons();
+    const currentSeason = seasons.find((s) => s.id === current) || null;
+
     // Excavations and emergences count the same hatchlings, so they must never
     // be summed together - an excavation is the authoritative census and wins
     // outright, and only in its absence do the nightly emergence logs stand in.
@@ -1319,10 +1338,14 @@ app.get("/public/stats", async (req, res) => {
         COALESCE(SUM(COALESCE(x.n, e.n, 0)), 0)::int AS hatchlings_released
       FROM turtle_nests n
       LEFT JOIN excavation x ON x.nest_code = n.nest_code
-      LEFT JOIN emergence  e ON e.nest_code = n.nest_code;
+      LEFT JOIN emergence  e ON e.nest_code = n.nest_code
+      ${currentSeason ? "WHERE n.date_found BETWEEN $1 AND $2" : ""};
     `;
 
-    const result = await db.query(sql);
+    const result = await db.query(
+      sql,
+      currentSeason ? [currentSeason.start, currentSeason.end] : []
+    );
     res.json({ message: "Public stats fetched successfully", stats: result.rows[0] });
   } catch (err) {
     console.error("Public stats error:", err);
