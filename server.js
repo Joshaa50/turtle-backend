@@ -465,6 +465,13 @@ const describeNestEvent = (e) => {
     return `Emergence logged: ${n} hatchling track${n === 1 ? "" : "s"}`;
   }
   if (type === "TOP_EGG") return "Top egg check recorded";
+  // QA-170: RELOCATION fell through to the raw event_type ("RELOCATION"),
+  // the one type QA-150's pass over this function missed.
+  if (type === "RELOCATION") {
+    const reburied = e.eggs_reburied ?? 0;
+    const total = e.total_eggs ?? "unknown";
+    return `Relocated: ${reburied} of ${total} eggs reburied`;
+  }
   return type || null;
 };
 
@@ -6508,7 +6515,8 @@ app.get("/audit/recent", async (req, res) => {
               t.name AS turtle_name,
               ne.event_type AS ne_event_type, ne.hatched_count AS ne_hatched_count,
               ne.total_eggs AS ne_total_eggs, ne.tracks_to_sea AS ne_tracks_to_sea,
-              ne.tracks_lost AS ne_tracks_lost, ne.nest_code AS ne_stored_nest_code,
+              ne.tracks_lost AS ne_tracks_lost, ne.eggs_reburied AS ne_eggs_reburied,
+              ne.nest_code AS ne_stored_nest_code,
               tn.nest_code AS nest_code,
               (SELECT MIN(id) FROM turtle_survey_events WHERE turtle_id = tse.turtle_id) AS first_event_id
        FROM record_audit a
@@ -6551,6 +6559,7 @@ app.get("/audit/recent", async (req, res) => {
           total_eggs: row.ne_total_eggs,
           tracks_to_sea: row.ne_tracks_to_sea,
           tracks_lost: row.ne_tracks_lost,
+          eggs_reburied: row.ne_eggs_reburied,
         });
         const code = row.nest_code || row.ne_stored_nest_code;
         summary = code ? `${described} (${code})` : described;
