@@ -3693,8 +3693,26 @@ app.put("/turtles/:id/update", requireRole(...RECORDERS), async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (req.user.role === VOLUNTEER && !(await isOwnRecord("turtle", id, req.user.id))) {
-      return res.status(403).json({ error: "You do not have permission to do that." });
+    // QA-172: isOwnRecord's record_audit lookup only ever matches a
+    // "created" row, and one can be missing - this turtle's own audit trail
+    // came back complete:false, with no "created" entry at all (seed data,
+    // or a write that predates the audit log). That left a Volunteer with no
+    // way to resubmit a sent-back correction, on a record review itself
+    // considers theirs. record_reviews.submitted_by is the same column
+    // PATCH /morning-surveys and the Review Queue's own resubmit route
+    // trust - status and submitter sit on one row that exists once a review
+    // was queued, so it survives a gap in record_audit. No review row, or
+    // one not currently sent back, means no Volunteer access.
+    if (req.user.role === VOLUNTEER) {
+      const gate = await db.query(
+        `SELECT status, submitted_by FROM record_reviews WHERE record_type = 'turtle' AND record_id = $1 LIMIT 1;`,
+        [id]
+      );
+      const review = gate.rows[0];
+      const isOwn = review?.submitted_by != null && String(review.submitted_by) === String(req.user.id);
+      if (!isOwn || review?.status !== "rejected") {
+        return res.status(403).json({ error: "You do not have permission to do that." });
+      }
     }
 
     const {

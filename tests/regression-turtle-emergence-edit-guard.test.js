@@ -9,6 +9,14 @@
 // Along the way, PUT /emergences/:id never wrote an "updated" audit row -
 // the trail showed a record as only ever "created", even after it had been
 // edited. Test 6 below is the one that would have caught that.
+//
+// QA-172: the turtle route's ownership check moved off record_audit onto
+// record_reviews.submitted_by + status (see the route's own comment) because
+// a turtle with no "created" audit row - real seed data, confirmed via
+// GET /audit/turtle/:id coming back complete:false - could never be
+// resubmitted by the Volunteer who legitimately owned its sent-back review.
+// The turtle tests below stub record_reviews instead of record_audit's
+// ownership SELECT; the emergence tests are unchanged.
 import { describe, it, expect, beforeEach, vi, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
@@ -48,12 +56,16 @@ const emergenceBody = {
 
 let query;
 
-// Builds a db.query stub whose ownership lookup (the record_audit SELECT
-// isOwnRecord issues) returns `ownerId`, and whose other lookups return
-// whatever a successful update needs.
-const stubQuery = (ownerId, { turtleRow = { id: 7, name: 'QA-Turtle', species: 'Caretta caretta', health_condition: 'Healthy' }, emergenceRow = { id: 119, beach: 'Loggos 2' } } = {}) =>
+// Builds a db.query stub whose ownership lookups return `ownerId` as the
+// submitter: the turtle route's record_reviews gate (QA-172) status
+// 'rejected', and the emergence route's unchanged record_audit "created"
+// lookup. Other lookups return whatever a successful update needs.
+const stubQuery = (ownerId, { turtleRow = { id: 7, name: 'QA-Turtle', species: 'Caretta caretta', health_condition: 'Healthy' }, emergenceRow = { id: 119, beach: 'Loggos 2' }, turtleReviewStatus = 'rejected' } = {}) =>
   vi.spyOn(db, 'query').mockImplementation((sql) => {
     const text = String(sql);
+    if (text.includes('FROM record_reviews') && text.includes("record_type = 'turtle'")) {
+      return Promise.resolve({ rows: ownerId == null ? [] : [{ status: turtleReviewStatus, submitted_by: ownerId }] });
+    }
     if (text.includes('FROM record_audit') && text.includes("action = 'created'")) {
       return Promise.resolve({ rows: ownerId == null ? [] : [{ actor_id: ownerId }] });
     }
@@ -124,6 +136,51 @@ describe('PUT /turtles/:id/update ownership guard (QA-030)', () => {
       expect.stringContaining('INSERT INTO record_audit'),
       expect.arrayContaining(['turtle', 7, 'updated']),
     );
+  });
+
+  // QA-172
+  it('allows a Volunteer to resubmit their own sent-back turtle even with no "created" audit row at all', async () => {
+    query = vi.spyOn(db, 'query').mockImplementation((sql) => {
+      const text = String(sql);
+      if (text.includes('FROM record_reviews') && text.includes("record_type = 'turtle'")) {
+        return Promise.resolve({ rows: [{ status: 'rejected', submitted_by: '51' }] });
+      }
+      // Confirms this turtle really has no "created" row - the exact gap
+      // that made the old record_audit-based check fail closed forever.
+      if (text.includes('FROM record_audit') && text.includes("action = 'created'")) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (text.includes('UPDATE turtles')) {
+        return Promise.resolve({ rows: [{ id: 7, name: 'Iris', species: 'Caretta caretta', health_condition: 'Healthy' }], rowCount: 1 });
+      }
+      if (text.includes('SELECT species, health_condition FROM turtles')) {
+        return Promise.resolve({ rows: [{ species: 'Caretta caretta', health_condition: 'Healthy' }] });
+      }
+      if (text.includes('INSERT INTO record_audit')) {
+        return Promise.resolve({ rows: [{ id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await asVolunteer(request(app).put('/turtles/7/update')).send(turtleBody);
+
+    expect(res.status).toBeLessThan(400);
+  });
+
+  it('refuses a Volunteer whose own turtle review is still pending (not yet sent back)', async () => {
+    query = stubQuery('51', { turtleReviewStatus: 'pending' });
+
+    const res = await asVolunteer(request(app).put('/turtles/7/update')).send(turtleBody);
+
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses a Volunteer when the turtle has no review row at all', async () => {
+    query = stubQuery(null);
+
+    const res = await asVolunteer(request(app).put('/turtles/7/update')).send(turtleBody);
+
+    expect(res.status).toBe(403);
   });
 });
 
